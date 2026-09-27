@@ -13,19 +13,26 @@ namespace pmf
 {
   namespace forms
   {
+    /**
+     * @brief Value-shape categories tracked by symbolic expressions.
+     *
+     * Shape metadata is checked by algebraic operations when expressions are
+     * combined.
+     */
     enum class ValueShape
     {
-      scalar,
-      vector,
-      tensor,
-      symmetric_tensor
+      scalar,          ///< A scalar value.
+      vector,          ///< A vector value.
+      tensor,          ///< A rank-2 tensor value.
+      symmetric_tensor ///< A symmetric rank-2 tensor value.
     };
 
+    /** @brief Identifies the role a named field plays in a form expression. */
     enum class SymbolKind
     {
-      trial,
-      test,
-      coefficient
+      trial,      ///< A formal trial argument.
+      test,       ///< A formal test argument.
+      coefficient ///< A scalar coefficient field.
     };
 
     namespace internal
@@ -60,11 +67,21 @@ namespace pmf
       };
     } // namespace internal
 
+    /**
+     * @brief A symbolic expression with runtime value-shape metadata.
+     *
+     * Expressions are created with trial(), test(), coefficient(), or
+     * constant(), then combined with the provided algebraic and differential
+     * operators. Invalid shape combinations throw `std::invalid_argument`.
+     */
     class Expression
     {
     public:
       Expression() = default;
 
+      /** @brief Return the value shape of this expression.
+       * @throws std::logic_error If this is an empty expression.
+       */
       ValueShape
       shape() const
       {
@@ -72,12 +89,14 @@ namespace pmf
         return node->shape;
       }
 
+      /** @brief Return whether this object contains an expression. */
       bool
       valid() const
       {
         return static_cast<bool>(node);
       }
 
+      /** @brief Return a readable representation of this expression. */
       std::string
       str() const;
 
@@ -141,24 +160,39 @@ namespace pmf
       return Expression(std::move(node));
     }
 
+    /**
+     * @brief Create a named formal trial argument.
+     * @param name The symbol name used when printing the expression.
+     * @param shape The value shape of the argument.
+     */
     inline Expression
     trial(const std::string &name, const ValueShape shape)
     {
       return make_symbol(name, SymbolKind::trial, shape);
     }
 
+    /**
+     * @brief Create a named formal test argument.
+     * @param name The symbol name used when printing the expression.
+     * @param shape The value shape of the argument.
+     */
     inline Expression
     test(const std::string &name, const ValueShape shape)
     {
       return make_symbol(name, SymbolKind::test, shape);
     }
 
+    /**
+     * @brief Create a named scalar coefficient field.
+     * @param name The coefficient name used when printing the expression.
+     */
     inline Expression
     coefficient(const std::string &name)
     {
       return make_symbol(name, SymbolKind::coefficient, ValueShape::scalar);
     }
 
+    /** @brief Create a scalar constant expression. */
     inline Expression
     constant(const double value)
     {
@@ -193,6 +227,7 @@ namespace pmf
       return Expression(std::move(node));
     }
 
+    /** @brief Add expressions with identical value shapes. */
     inline Expression
     operator+(const Expression &left, const Expression &right)
     {
@@ -201,6 +236,7 @@ namespace pmf
       return make_binary(internal::NodeKind::add, left, right, left.shape());
     }
 
+    /** @brief Subtract expressions with identical value shapes. */
     inline Expression
     operator-(const Expression &left, const Expression &right)
     {
@@ -213,6 +249,10 @@ namespace pmf
                          left.shape());
     }
 
+    /**
+     * @brief Multiply expressions when at least one operand is scalar.
+     * @throws std::invalid_argument If both operands are non-scalar.
+     */
     inline Expression
     operator*(const Expression &left, const Expression &right)
     {
@@ -227,24 +267,32 @@ namespace pmf
       return make_binary(internal::NodeKind::multiply, left, right, shape);
     }
 
+    /** @brief Scale an expression by a scalar on the right. */
     inline Expression
     operator*(const Expression &left, const double right)
     {
       return left * constant(right);
     }
 
+    /** @brief Scale an expression by a scalar on the left. */
     inline Expression
     operator*(const double left, const Expression &right)
     {
       return constant(left) * right;
     }
 
+    /** @brief Negate an expression. */
     inline Expression
     operator-(const Expression &expression)
     {
       return constant(-1.0) * expression;
     }
 
+    /**
+     * @brief Differentiate a scalar or vector expression.
+     * @return A vector for scalar input, or a rank-2 tensor for vector input.
+     * @throws std::invalid_argument If the input is a tensor.
+     */
     inline Expression
     grad(const Expression &expression)
     {
@@ -267,6 +315,11 @@ namespace pmf
       return Expression(std::move(node));
     }
 
+    /**
+     * @brief Take the divergence of a vector expression.
+     * @return A scalar expression.
+     * @throws std::invalid_argument If the input is not a vector.
+     */
     inline Expression
     div(const Expression &expression)
     {
@@ -278,6 +331,11 @@ namespace pmf
       return Expression(std::move(node));
     }
 
+    /**
+     * @brief Symmetrize a rank-2 tensor expression.
+     * @return A symmetric rank-2 tensor expression.
+     * @throws std::invalid_argument If the input is not a rank-2 tensor.
+     */
     inline Expression
     sym(const Expression &expression)
     {
@@ -289,6 +347,12 @@ namespace pmf
       return Expression(std::move(node));
     }
 
+    /**
+     * @brief Contract two vector or tensor expressions.
+     * @return A scalar expression.
+     * @throws std::invalid_argument If the operands have different shapes or
+     *         are scalars.
+     */
     inline Expression
     inner(const Expression &left, const Expression &right)
     {
@@ -301,26 +365,37 @@ namespace pmf
                          ValueShape::scalar);
     }
 
+    /** @brief Marker type for integration over cells. */
     struct CellMeasure
     {};
 
+    /** @brief Cell integration measure accepted by integral(). */
     constexpr CellMeasure dx{};
 
+    /**
+     * @brief A sum or difference of cell integrals.
+     *
+     * A form is created with integral() and combined with the form-level `+`
+     * and `-` operators.
+     */
     class Form
     {
     public:
+      /** @brief One signed cell-integral term in this form. */
       struct IntegralTerm
       {
         Expression expression;
         int        sign;
       };
 
+      /** @brief Return the signed integral terms in insertion order. */
       const std::vector<IntegralTerm> &
       integrals() const
       {
         return terms;
       }
 
+      /** @brief Return a readable representation of this form. */
       std::string
       str() const;
 
@@ -340,6 +415,12 @@ namespace pmf
       operator-(const Form &, const Form &);
     };
 
+    /**
+     * @brief Integrate a scalar expression over cells.
+     * @param expression The scalar integrand.
+     * @param measure The cell measure, currently `dx`.
+     * @throws std::invalid_argument If the integrand is not scalar.
+     */
     inline Form
     integral(const Expression &expression, CellMeasure)
     {
@@ -347,6 +428,7 @@ namespace pmf
       return Form(expression);
     }
 
+    /** @brief Add the cell-integral terms of two forms. */
     inline Form
     operator+(const Form &left, const Form &right)
     {
@@ -357,6 +439,7 @@ namespace pmf
       return result;
     }
 
+    /** @brief Subtract the cell-integral terms of one form from another. */
     inline Form
     operator-(const Form &left, const Form &right)
     {
@@ -445,12 +528,14 @@ namespace pmf
       return out.str();
     }
 
+    /** @brief Write an expression's readable representation to a stream. */
     inline std::ostream &
     operator<<(std::ostream &out, const Expression &expression)
     {
       return out << expression.str();
     }
 
+    /** @brief Write a form's readable representation to a stream. */
     inline std::ostream &
     operator<<(std::ostream &out, const Form &form)
     {
