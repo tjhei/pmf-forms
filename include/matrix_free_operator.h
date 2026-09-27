@@ -1,10 +1,11 @@
-#ifndef PMF_FORM_ELASTICITY_MATRIX_FREE_H
-#define PMF_FORM_ELASTICITY_MATRIX_FREE_H
+#ifndef PMF_FORM_MATRIX_FREE_OPERATOR_H
+#define PMF_FORM_MATRIX_FREE_OPERATOR_H
 
 #include <deal.II/base/config.h>
 
 #include <deal.II/base/tensor.h>
 
+#include <deal.II/lac/la_parallel_block_vector.h>
 #include <deal.II/lac/la_parallel_vector.h>
 
 #include <deal.II/matrix_free/fe_evaluation.h>
@@ -913,6 +914,127 @@ namespace pmf
         Coefficients coefficients;
       };
 
+      namespace internal
+      {
+        template <typename Field, int dim>
+        struct FieldComponentCount
+          : std::integral_constant<unsigned int,
+                                   Field::shape == ValueShape::scalar ? 1 : dim>
+        {};
+
+        template <typename Fields, unsigned int index, int dim>
+        struct FieldComponentOffset;
+
+        template <typename First, typename... Rest, int dim>
+        struct FieldComponentOffset<TypeList<First, Rest...>, 0, dim>
+          : std::integral_constant<unsigned int, 0>
+        {};
+
+        template <typename First, typename... Rest, unsigned int index, int dim>
+        struct FieldComponentOffset<TypeList<First, Rest...>, index, dim>
+          : std::integral_constant<
+              unsigned int,
+              FieldComponentCount<First, dim>::value +
+                FieldComponentOffset<TypeList<Rest...>, index - 1, dim>::value>
+        {};
+
+        template <typename Fields, int dim>
+        struct TotalFieldComponents;
+
+        template <int dim>
+        struct TotalFieldComponents<TypeList<>, dim>
+          : std::integral_constant<unsigned int, 0>
+        {};
+
+        template <typename First, typename... Rest, int dim>
+        struct TotalFieldComponents<TypeList<First, Rest...>, dim>
+          : std::integral_constant<
+              unsigned int,
+              FieldComponentCount<First, dim>::value +
+                TotalFieldComponents<TypeList<Rest...>, dim>::value>
+        {};
+
+        template <typename CoefficientSymbol>
+        struct CoefficientTagOf;
+
+        template <typename Tag>
+        struct CoefficientTagOf<Coefficient<Tag>>
+        {
+          using type = Tag;
+        };
+      } // namespace internal
+
+      /** @brief Quadrature kernel for the current two-field Stokes form. */
+      template <int dim, typename Form, typename Coefficients>
+      class StokesQuadratureKernel
+      {
+        using Analysis    = FormFields<Form>;
+        using TrialFields = typename Analysis::trial_fields;
+        using TestFields  = typename Analysis::test_fields;
+        using Velocity    = typename internal::TypeListAt<0, TrialFields>::type;
+        using Pressure    = typename internal::TypeListAt<1, TrialFields>::type;
+        using TestVelocity = typename internal::TypeListAt<0, TestFields>::type;
+        using TestPressure = typename internal::TypeListAt<1, TestFields>::type;
+        using MuSymbol     = typename internal::
+          TypeListAt<0, typename Analysis::coefficient_tags>::type;
+        using MuTag = typename internal::CoefficientTagOf<MuSymbol>::type;
+
+      public:
+        StokesQuadratureKernel(Form form, Coefficients coefficients)
+          : form(std::move(form))
+          , coefficients(std::move(coefficients))
+        {
+          static_assert(
+            Analysis::n_trial_fields == 2 && Analysis::n_test_fields == 2,
+            "the Stokes kernel expects two trial and two test fields");
+          static_assert(
+            Velocity::shape == ValueShape::vector &&
+              TestVelocity::shape == ValueShape::vector &&
+              Pressure::shape == ValueShape::scalar &&
+              TestPressure::shape == ValueShape::scalar,
+            "Stokes fields must be vector velocity and scalar pressure");
+          static_assert(
+            Analysis::n_coefficients == 1,
+            "the current Stokes kernel expects one viscosity symbol");
+          static_assert(
+            internal::FieldRequirements<Form, Velocity>::gradient &&
+              internal::FieldRequirements<Form, Pressure>::value &&
+              internal::FieldRequirements<Form, TestVelocity>::gradient &&
+              internal::FieldRequirements<Form, TestPressure>::value,
+            "Stokes evaluations must be derived as u:gradient, p:value, "
+            "v:gradient, q:value");
+        }
+
+        template <typename VelocityEvaluation, typename PressureEvaluation>
+        DEAL_II_HOST_DEVICE void
+        operator()(VelocityEvaluation &velocity_phi,
+                   PressureEvaluation &pressure_phi,
+                   const unsigned int  q) const
+        {
+          const auto velocity_gradient = velocity_phi.get_gradient(q);
+          using Number =
+            typename std::decay<decltype(velocity_gradient[0][0])>::type;
+
+          const Number mu = static_cast<Number>(
+            internal::coefficient_value<MuTag>(coefficients));
+          const auto symmetric_gradient =
+            Number(0.5) * (velocity_gradient + transpose(velocity_gradient));
+          dealii::Tensor<2, dim, Number> stress =
+            (Number(2) * mu) * symmetric_gradient;
+          const Number pressure   = pressure_phi.get_value(q);
+          const Number divergence = trace(velocity_gradient);
+          for (unsigned int d = 0; d < dim; ++d)
+            stress[d][d] -= pressure;
+
+          velocity_phi.submit_gradient(stress, q);
+          pressure_phi.submit_value(-divergence, q);
+        }
+
+      private:
+        Form         form;
+        Coefficients coefficients;
+      };
+
       /**
        * @brief Apply a static isotropic-elasticity form with CPU MatrixFree.
        *
@@ -1188,6 +1310,152 @@ namespace pmf
         CellOperation         cell_operation;
       };
 
+      /** @brief MatrixFree operator for the two-field Stokes form. */
+      template <int dim,
+                int fe_degree,
+                typename Form,
+                typename Coefficients,
+                typename VectorType = dealii::LinearAlgebra::distributed::
+                  BlockVector<typename Coefficients::value_type>>
+      class MatrixFreeStokesOperator
+        : public dealii::MatrixFreeOperators::Base<dim, VectorType>
+      {
+      public:
+        using Number = typename Coefficients::value_type;
+        using Data   = dealii::MatrixFree<dim, Number>;
+        using Vector = VectorType;
+        using Kernel = StokesQuadratureKernel<dim, Form, Coefficients>;
+
+        MatrixFreeStokesOperator(std::shared_ptr<const Data> data,
+                                 Form                        form,
+                                 Coefficients                coefficients)
+          : kernel(std::move(form), std::move(coefficients))
+        {
+          this->initialize(std::move(data));
+        }
+
+        void
+        initialize_dof_vector(VectorType &vector) const
+        {
+          this->data->initialize_dof_vector(vector);
+        }
+
+        void
+        compute_diagonal() override
+        {
+          throw std::logic_error("diagonal computation is not implemented");
+        }
+
+      private:
+        void
+        apply_add(VectorType &dst, const VectorType &src) const override
+        {
+          this->data->cell_loop(&MatrixFreeStokesOperator::local_apply,
+                                this,
+                                dst,
+                                src);
+        }
+
+        void
+        local_apply(const Data                                  &mf,
+                    VectorType                                  &dst,
+                    const VectorType                            &src,
+                    const std::pair<unsigned int, unsigned int> &range) const
+        {
+          dealii::FEEvaluation<dim, fe_degree, fe_degree + 1, dim> velocity_phi(
+            mf, 0);
+          dealii::FEEvaluation<dim, fe_degree, fe_degree + 1, 1> pressure_phi(
+            mf, 1);
+          for (unsigned int cell = range.first; cell < range.second; ++cell)
+            {
+              velocity_phi.reinit(cell);
+              pressure_phi.reinit(cell);
+              velocity_phi.read_dof_values(src, 0);
+              pressure_phi.read_dof_values(src, 1);
+              velocity_phi.evaluate(dealii::EvaluationFlags::gradients);
+              pressure_phi.evaluate(dealii::EvaluationFlags::values);
+              for (unsigned int q = 0; q < velocity_phi.n_q_points; ++q)
+                kernel(velocity_phi, pressure_phi, q);
+              velocity_phi.integrate(dealii::EvaluationFlags::gradients);
+              pressure_phi.integrate(dealii::EvaluationFlags::values);
+              velocity_phi.distribute_local_to_global(dst, 0);
+              pressure_phi.distribute_local_to_global(dst, 1);
+            }
+        }
+
+        Kernel kernel;
+      };
+
+      /** @brief Portable::MatrixFree operator for the two-field Stokes form. */
+      template <int dim,
+                int fe_degree,
+                typename Form,
+                typename Coefficients,
+                typename VectorType = dealii::LinearAlgebra::distributed::
+                  BlockVector<typename Coefficients::value_type,
+                              dealii::MemorySpace::Default>>
+      class PortableMatrixFreeStokesOperator
+      {
+      public:
+        using Number = typename Coefficients::value_type;
+        using Data   = dealii::Portable::MatrixFree<dim, Number>;
+        using Vector = VectorType;
+        using Kernel = StokesQuadratureKernel<dim, Form, Coefficients>;
+
+        PortableMatrixFreeStokesOperator(std::shared_ptr<Data> data,
+                                         Form                  form,
+                                         Coefficients          coefficients)
+          : data(std::move(data))
+          , cell_operation{Kernel(std::move(form), std::move(coefficients))}
+        {}
+
+        void
+        initialize_dof_vector(VectorType &vector) const
+        {
+          data->initialize_dof_vector(vector);
+        }
+
+        void
+        vmult(VectorType &dst, const VectorType &src) const
+        {
+          dst = Number();
+          data->cell_loop(cell_operation, src, dst);
+          data->copy_constrained_values(src, dst);
+        }
+
+      private:
+        struct CellOperation
+        {
+          static constexpr unsigned int n_q_points =
+            dealii::Utilities::pow(fe_degree + 1, dim);
+          Kernel kernel;
+
+          DEAL_II_HOST_DEVICE void
+          operator()(const typename Data::Data *cell_data,
+                     const dealii::Portable::DeviceBlockVector<Number> &src,
+                     dealii::Portable::DeviceBlockVector<Number> &dst) const
+          {
+            dealii::Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, dim>
+              velocity_phi(cell_data, 0);
+            dealii::Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, 1>
+              pressure_phi(cell_data, 1);
+            velocity_phi.read_dof_values(src.block(0));
+            pressure_phi.read_dof_values(src.block(1));
+            velocity_phi.evaluate(dealii::EvaluationFlags::gradients);
+            pressure_phi.evaluate(dealii::EvaluationFlags::values);
+            for (unsigned int q = 0; q < velocity_phi.n_q_points; ++q)
+              kernel(velocity_phi, pressure_phi, q);
+            velocity_phi.integrate(dealii::EvaluationFlags::gradients);
+            pressure_phi.integrate(dealii::EvaluationFlags::values);
+            velocity_phi.distribute_local_to_global(dst.block(0));
+            pressure_phi.distribute_local_to_global(dst.block(1));
+          }
+        };
+
+        std::shared_ptr<Data> data;
+        CellOperation         cell_operation;
+      };
+
       namespace internal
       {
         template <typename Expression>
@@ -1251,43 +1519,67 @@ namespace pmf
                 int fe_degree,
                 typename Form,
                 typename Coefficients = NoCoefficients,
-                typename VectorType   = dealii::LinearAlgebra::distributed::
-                  Vector<typename Coefficients::value_type>>
+                typename VectorType   = typename std::conditional<
+                  (FormFields<Form>::n_trial_fields > 1),
+                  dealii::LinearAlgebra::distributed::BlockVector<
+                    typename Coefficients::value_type>,
+                  dealii::LinearAlgebra::distributed::Vector<
+                    typename Coefficients::value_type>>::type>
       using MatrixFreeOperator = typename std::conditional<
-        internal::FormFieldInfo<Form>::shape == ValueShape::scalar,
-        MatrixFreeScalarFormOperator<dim,
-                                     fe_degree,
-                                     Form,
-                                     Coefficients,
-                                     typename Coefficients::value_type,
-                                     VectorType>,
-        MatrixFreeFormOperator<dim,
-                               fe_degree,
-                               Form,
-                               Coefficients,
-                               VectorType>>::type;
+        (FormFields<Form>::n_trial_fields > 1),
+        MatrixFreeStokesOperator<dim,
+                                 fe_degree,
+                                 Form,
+                                 Coefficients,
+                                 VectorType>,
+        typename std::conditional<
+          internal::FormFieldInfo<Form>::shape == ValueShape::scalar,
+          MatrixFreeScalarFormOperator<dim,
+                                       fe_degree,
+                                       Form,
+                                       Coefficients,
+                                       typename Coefficients::value_type,
+                                       VectorType>,
+          MatrixFreeFormOperator<dim,
+                                 fe_degree,
+                                 Form,
+                                 Coefficients,
+                                 VectorType>>::type>::type;
 
       /** @brief Portable::MatrixFree operator selected from the form shape. */
       template <int dim,
                 int fe_degree,
                 typename Form,
                 typename Coefficients = NoCoefficients,
-                typename VectorType   = dealii::LinearAlgebra::distributed::
-                  Vector<typename Coefficients::value_type,
-                         dealii::MemorySpace::Default>>
+                typename VectorType   = typename std::conditional<
+                  (FormFields<Form>::n_trial_fields > 1),
+                  dealii::LinearAlgebra::distributed::BlockVector<
+                    typename Coefficients::value_type,
+                    dealii::MemorySpace::Default>,
+                  dealii::LinearAlgebra::distributed::Vector<
+                    typename Coefficients::value_type,
+                    dealii::MemorySpace::Default>>::type>
       using PortableMatrixFreeOperator = typename std::conditional<
-        internal::FormFieldInfo<Form>::shape == ValueShape::scalar,
-        PortableMatrixFreeScalarFormOperator<dim,
-                                             fe_degree,
-                                             Form,
-                                             Coefficients,
-                                             typename Coefficients::value_type,
-                                             VectorType>,
-        PortableMatrixFreeFormOperator<dim,
-                                       fe_degree,
-                                       Form,
-                                       Coefficients,
-                                       VectorType>>::type;
+        (FormFields<Form>::n_trial_fields > 1),
+        PortableMatrixFreeStokesOperator<dim,
+                                         fe_degree,
+                                         Form,
+                                         Coefficients,
+                                         VectorType>,
+        typename std::conditional<
+          internal::FormFieldInfo<Form>::shape == ValueShape::scalar,
+          PortableMatrixFreeScalarFormOperator<
+            dim,
+            fe_degree,
+            Form,
+            Coefficients,
+            typename Coefficients::value_type,
+            VectorType>,
+          PortableMatrixFreeFormOperator<dim,
+                                         fe_degree,
+                                         Form,
+                                         Coefficients,
+                                         VectorType>>::type>::type;
 
       /** @brief Backwards-compatible name for the form-driven CPU operator. */
       template <int dim,

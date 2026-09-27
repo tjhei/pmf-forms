@@ -52,6 +52,9 @@ target_include_directories(laplace PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 add_executable(stokes stokes/stokes.cc)
+target_include_directories(stokes PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
 deal_ii_setup_target(elasticity)
 deal_ii_setup_target(laplace)

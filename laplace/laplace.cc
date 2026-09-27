@@ -14,8 +14,8 @@
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/la_parallel_vector.h>
 
-#include <elasticity_matrix_free.h>
 #include <forms.h>
+#include <matrix_free_operator.h>
 
 #include <algorithm>
 #include <cmath>

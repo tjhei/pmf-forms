@@ -17,8 +17,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <elasticity_matrix_free.h>
 #include <forms.h>
+#include <matrix_free_operator.h>
 
 #include <type_traits>
 
@@ -39,10 +39,6 @@ TEST_CASE("Stokes form is represented by expression-template types",
   {};
   struct PressureTag
   {};
-  struct TestVelocityTag
-  {};
-  struct TestPressureTag
-  {};
   struct ViscosityTag
   {};
 
@@ -50,13 +46,27 @@ TEST_CASE("Stokes form is represented by expression-template types",
 
   const auto u  = trial<VelocityTag, ValueShape::vector>();
   const auto p  = trial<PressureTag, ValueShape::scalar>();
-  const auto v  = test<TestVelocityTag, ValueShape::vector>();
-  const auto q  = test<TestPressureTag, ValueShape::scalar>();
+  const auto v  = test<VelocityTag, ValueShape::vector>();
+  const auto q  = test<PressureTag, ValueShape::scalar>();
   const auto mu = coefficient<ViscosityTag>();
 
   const auto stokes =
     integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx) -
     integral(div(v) * p, dx) - integral(q * div(u), dx);
+
+  using StokesForm   = typename std::decay<decltype(stokes)>::type;
+  using StokesFields = FormFields<StokesForm>;
+  STATIC_REQUIRE(StokesFields::n_trial_fields == 2);
+  STATIC_REQUIRE(StokesFields::n_test_fields == 2);
+  STATIC_REQUIRE(StokesFields::n_coefficients == 1);
+  static_assert(internal::FieldRequirements<StokesForm, decltype(u)>::gradient,
+                "velocity trial must require gradients");
+  static_assert(internal::FieldRequirements<StokesForm, decltype(p)>::value,
+                "pressure trial must require values");
+  static_assert(internal::FieldRequirements<StokesForm, decltype(v)>::gradient,
+                "velocity test must receive gradients");
+  static_assert(internal::FieldRequirements<StokesForm, decltype(q)>::value,
+                "pressure test must receive values");
 
   STATIC_REQUIRE(sizeof(stokes) > 0);
   static_assert(decltype(grad(u))::shape == ValueShape::tensor);

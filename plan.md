@@ -23,6 +23,11 @@ Implemented and build-checked:
   distributed vector and checks their relative error.
 - A matching scalar Laplace example that binds a non-unit diffusion
   coefficient and checks both backends under MPI.
+- Compile-time trial/test field lists, coefficient tags, and value/gradient
+  requirements derived from the expression tree.
+- A two-field Stokes operator using separate velocity and pressure DoFHandlers
+  and block vectors on CPU and Portable MatrixFree, with an MPI comparison
+  example.
 - Catch2 unit and backend comparison cases.
 
 Still incomplete:
@@ -30,7 +35,7 @@ Still incomplete:
 - Variable coefficient fields and general coefficient binding to FE data.
 - A general form-to-kernel lowering system; current backend visitors support
   selected expression patterns.
-- Stokes and mixed-system MatrixFree operators.
+- General mixed-system lowering beyond the current two-field Stokes pattern.
 - `FEValues` assembly from the same form.
 - General validation of form arity, linearity, field shape consistency, and
   backend capabilities.
@@ -45,7 +50,7 @@ execution.
 
 The immediate goal is deliberately narrow:
 
-> Express Stokes and variable-coefficient isotropic elasticity once, and use the same form description to build an assembled matrix, a `dealii::MatrixFree` operator, and a `Portable::MatrixFree` operator.
+> Express representative Stokes and isotropic-elasticity forms once, and use the same form description to build `dealii::MatrixFree` and `Portable::MatrixFree` operators. Derive mixed field and evaluation metadata from the expression at compile time.
 
 The prototype should establish that a higher-level form description can eventually achieve essentially the same CPU and GPU performance as hand-written deal.II matrix-free kernels.
 

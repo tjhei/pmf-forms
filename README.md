@@ -12,8 +12,10 @@ compile time and selects scalar or vector evaluation.
 
 For a single-field form, `trial()` and `test()` use default scalar symbols;
 write `trial<ValueShape::vector>()` and `test<ValueShape::vector>()` for vector
-fields. Explicit tags remain available when a form has multiple trial/test
-arguments or multiple independently bound coefficients.
+fields. For mixed forms, tags name the fields and are shared between a field's
+trial and test symbols. A tag distinguishes fields with the same role and
+shape; a single-field form can use the default symbols. Coefficient tags
+identify independently bound coefficients.
 
 ## Examples
 
@@ -97,16 +99,48 @@ form. A constant-coefficient isotropic elasticity pattern with separate Lamé
 parameters is also available through `elasticity_coefficients`; see
 `tests/test_main.cc` for the current API examples.
 
+### Stokes
+
+Mixed forms use compile-time field identities. The expression determines the
+trial/test field lists and whether each field needs values or gradients:
+
+```cpp
+struct VelocityTag;
+struct PressureTag;
+struct ViscosityTag;
+
+auto u  = trial<VelocityTag, ValueShape::vector>();
+auto p  = trial<PressureTag, ValueShape::scalar>();
+auto v  = test<VelocityTag, ValueShape::vector>();
+auto q  = test<PressureTag, ValueShape::scalar>();
+auto mu = coefficient<ViscosityTag>();
+
+auto stokes =
+  integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx)
+  - integral(div(v) * p, dx)
+  - integral(q * div(u), dx);
+```
+
+The current Stokes lowering uses separate velocity and pressure DoFHandlers
+and block vectors. CPU and Portable operators use the same form. `FormFields`
+and `FieldRequirements` expose expression-derived compile-time metadata for
+field lists and value/gradient requirements. Run the MPI comparison with:
+
+```sh
+mpiexec -n 2 ./build/stokes
+```
+
 ## Current scope
 
 The implemented matrix-free subset is scalar Laplace and Helmholtz forms,
 including independently tagged constant diffusion and reaction coefficients,
-plus the supported isotropic elasticity patterns. Coefficient symbols bind to
-constant values today; spatially varying coefficient fields are not yet
-implemented. Stokes and mixed systems can be represented by the expression
-types, but are not yet lowered to MatrixFree operators. Assembled `FEValues`
-operators, boundary and face terms, and diagonal computation are also future
-work. See [plan.md](plan.md) for the roadmap and status.
+the supported isotropic elasticity patterns, and a two-field Stokes form.
+Coefficient symbols bind to constant values today; spatially varying
+coefficient fields and general expression-to-kernel lowering are not yet
+implemented. The current mixed lowering supports the Stokes form above.
+Assembled `FEValues` operators, boundary and face terms, and diagonal
+computation are also future work. See [plan.md](plan.md) for the roadmap and
+status.
 
 ## Build and test
 

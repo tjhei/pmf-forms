@@ -196,6 +196,239 @@ namespace pmf
       struct IsForm<FormDifference<Left, Right>> : std::true_type
       {};
 
+      /** @brief Type-level list used by compile-time form analysis. */
+      template <typename... Types>
+      struct TypeList
+      {};
+
+      namespace internal
+      {
+        template <typename List>
+        struct TypeListSize;
+
+        template <typename... Types>
+        struct TypeListSize<TypeList<Types...>>
+          : std::integral_constant<unsigned int, sizeof...(Types)>
+        {};
+
+        template <unsigned int index, typename List>
+        struct TypeListAt;
+
+        template <typename First, typename... Rest>
+        struct TypeListAt<0, TypeList<First, Rest...>>
+        {
+          using type = First;
+        };
+
+        template <unsigned int index, typename First, typename... Rest>
+        struct TypeListAt<index, TypeList<First, Rest...>>
+          : TypeListAt<index - 1, TypeList<Rest...>>
+        {};
+
+        template <typename Type, typename List>
+        struct TypeListContains;
+
+        template <typename Type>
+        struct TypeListContains<Type, TypeList<>> : std::false_type
+        {};
+
+        template <typename Type, typename First, typename... Rest>
+        struct TypeListContains<Type, TypeList<First, Rest...>>
+          : std::conditional<std::is_same<Type, First>::value,
+                             std::true_type,
+                             TypeListContains<Type, TypeList<Rest...>>>::type
+        {};
+
+        template <typename List, typename Type>
+        struct TypeListAppendUnique;
+
+        template <typename... Types, typename Type>
+        struct TypeListAppendUnique<TypeList<Types...>, Type>
+        {
+          using type = typename std::conditional<
+            TypeListContains<Type, TypeList<Types...>>::value,
+            TypeList<Types...>,
+            TypeList<Types..., Type>>::type;
+        };
+
+        template <typename Left, typename Right>
+        struct TypeListMergeUnique;
+
+        template <typename Left>
+        struct TypeListMergeUnique<Left, TypeList<>>
+        {
+          using type = Left;
+        };
+
+        template <typename Left, typename First, typename... Rest>
+        struct TypeListMergeUnique<Left, TypeList<First, Rest...>>
+        {
+          using appended = typename TypeListAppendUnique<Left, First>::type;
+          using type =
+            typename TypeListMergeUnique<appended, TypeList<Rest...>>::type;
+        };
+
+        template <typename Expression>
+        struct FieldAnalysis
+        {
+          using trial_fields     = TypeList<>;
+          using test_fields      = TypeList<>;
+          using coefficient_tags = TypeList<>;
+        };
+
+        template <typename Tag, ValueShape Shape>
+        struct FieldAnalysis<Trial<Tag, Shape>>
+        {
+          using trial_fields     = TypeList<Trial<Tag, Shape>>;
+          using test_fields      = TypeList<>;
+          using coefficient_tags = TypeList<>;
+        };
+
+        template <typename Tag, ValueShape Shape>
+        struct FieldAnalysis<Test<Tag, Shape>>
+        {
+          using trial_fields     = TypeList<>;
+          using test_fields      = TypeList<Test<Tag, Shape>>;
+          using coefficient_tags = TypeList<>;
+        };
+
+        template <typename Tag>
+        struct FieldAnalysis<Coefficient<Tag>>
+        {
+          using trial_fields     = TypeList<>;
+          using test_fields      = TypeList<>;
+          using coefficient_tags = TypeList<Coefficient<Tag>>;
+        };
+
+        template <typename Expression>
+        struct FieldAnalysis<Gradient<Expression>> : FieldAnalysis<Expression>
+        {};
+        template <typename Expression>
+        struct FieldAnalysis<Divergence<Expression>> : FieldAnalysis<Expression>
+        {};
+        template <typename Expression>
+        struct FieldAnalysis<Symmetrize<Expression>> : FieldAnalysis<Expression>
+        {};
+        template <typename Expression>
+        struct FieldAnalysis<Integral<Expression>> : FieldAnalysis<Expression>
+        {};
+
+#define PMF_FORM_ANALYZE_BINARY(Node)                         \
+  template <typename Left, typename Right>                    \
+  struct FieldAnalysis<Node<Left, Right>>                     \
+  {                                                           \
+    using trial_fields = typename TypeListMergeUnique<        \
+      typename FieldAnalysis<Left>::trial_fields,             \
+      typename FieldAnalysis<Right>::trial_fields>::type;     \
+    using test_fields = typename TypeListMergeUnique<         \
+      typename FieldAnalysis<Left>::test_fields,              \
+      typename FieldAnalysis<Right>::test_fields>::type;      \
+    using coefficient_tags = typename TypeListMergeUnique<    \
+      typename FieldAnalysis<Left>::coefficient_tags,         \
+      typename FieldAnalysis<Right>::coefficient_tags>::type; \
+  }
+
+        PMF_FORM_ANALYZE_BINARY(Add);
+        PMF_FORM_ANALYZE_BINARY(Subtract);
+        PMF_FORM_ANALYZE_BINARY(Multiply);
+        PMF_FORM_ANALYZE_BINARY(Inner);
+        PMF_FORM_ANALYZE_BINARY(FormSum);
+        PMF_FORM_ANALYZE_BINARY(FormDifference);
+#undef PMF_FORM_ANALYZE_BINARY
+
+        template <typename Expression, typename Field>
+        struct FieldRequirementsImpl
+        {
+          static constexpr bool value    = false;
+          static constexpr bool gradient = false;
+        };
+
+        template <typename Tag, ValueShape Shape>
+        struct FieldRequirementsImpl<Trial<Tag, Shape>, Trial<Tag, Shape>>
+        {
+          static constexpr bool value    = true;
+          static constexpr bool gradient = false;
+        };
+
+        template <typename Tag, ValueShape Shape>
+        struct FieldRequirementsImpl<Test<Tag, Shape>, Test<Tag, Shape>>
+        {
+          static constexpr bool value    = true;
+          static constexpr bool gradient = false;
+        };
+
+        template <typename Expression, typename Field>
+        struct FieldRequirementsImpl<Gradient<Expression>, Field>
+        {
+          static constexpr bool value = false;
+          static constexpr bool gradient =
+            TypeListContains<
+              Field,
+              typename FieldAnalysis<Expression>::trial_fields>::value ||
+            TypeListContains<
+              Field,
+              typename FieldAnalysis<Expression>::test_fields>::value;
+        };
+
+        template <typename Expression, typename Field>
+        struct FieldRequirementsImpl<Divergence<Expression>, Field>
+          : FieldRequirementsImpl<Gradient<Expression>, Field>
+        {};
+
+        template <typename Expression, typename Field>
+        struct FieldRequirementsImpl<Symmetrize<Expression>, Field>
+          : FieldRequirementsImpl<Expression, Field>
+        {};
+
+        template <typename Expression, typename Field>
+        struct FieldRequirementsImpl<Integral<Expression>, Field>
+          : FieldRequirementsImpl<Expression, Field>
+        {};
+
+#define PMF_FORM_REQUIREMENTS_BINARY(Node)                                     \
+  template <typename Left, typename Right, typename Field>                     \
+  struct FieldRequirementsImpl<Node<Left, Right>, Field>                       \
+  {                                                                            \
+    static constexpr bool value = FieldRequirementsImpl<Left, Field>::value || \
+                                  FieldRequirementsImpl<Right, Field>::value;  \
+    static constexpr bool gradient =                                           \
+      FieldRequirementsImpl<Left, Field>::gradient ||                          \
+      FieldRequirementsImpl<Right, Field>::gradient;                           \
+  }
+
+        PMF_FORM_REQUIREMENTS_BINARY(Add);
+        PMF_FORM_REQUIREMENTS_BINARY(Subtract);
+        PMF_FORM_REQUIREMENTS_BINARY(Multiply);
+        PMF_FORM_REQUIREMENTS_BINARY(Inner);
+        PMF_FORM_REQUIREMENTS_BINARY(FormSum);
+        PMF_FORM_REQUIREMENTS_BINARY(FormDifference);
+#undef PMF_FORM_REQUIREMENTS_BINARY
+
+        template <typename Expression, typename Field>
+        struct FieldRequirements
+          : FieldRequirementsImpl<Expression, typename std::decay<Field>::type>
+        {};
+      } // namespace internal
+
+      /**
+       * @brief Compile-time trial/test fields and evaluation needs of a form.
+       *
+       * `trial_fields` and `test_fields` are unique type lists. Query
+       * `internal::FieldRequirements<Form, Field>` for value/gradient use.
+       */
+      template <typename Form>
+      struct FormFields : internal::FieldAnalysis<Form>
+      {
+        static constexpr unsigned int n_trial_fields = internal::TypeListSize<
+          typename internal::FieldAnalysis<Form>::trial_fields>::value;
+        static constexpr unsigned int n_test_fields = internal::TypeListSize<
+          typename internal::FieldAnalysis<Form>::test_fields>::value;
+        using coefficient_tags =
+          typename internal::FieldAnalysis<Form>::coefficient_tags;
+        static constexpr unsigned int n_coefficients =
+          internal::TypeListSize<coefficient_tags>::value;
+      };
+
       /** @brief Create a typed formal trial field. */
       template <typename Tag, ValueShape Shape>
       constexpr Trial<Tag, Shape>
