@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.13.4)
+cmake_minimum_required(VERSION 3.14)
 
 find_package(deal.II 9.7.0
   HINTS ${deal.II_DIR} ${DEAL_II_DIR} ../ ../../ $ENV{DEAL_II_DIR}
@@ -31,6 +31,17 @@ endif()
 deal_ii_initialize_cached_variables()
 project(pmf-form)
 
+include(FetchContent)
+include(CTest)
+
+FetchContent_Declare(
+  Catch2
+  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+  GIT_TAG        v3.11.0
+  GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(Catch2)
+
 add_executable(elasticity elasticity/elasticity.cc)
 add_executable(laplace laplace/laplace.cc)
 add_executable(stokes stokes/stokes.cc)
@@ -38,3 +49,13 @@ add_executable(stokes stokes/stokes.cc)
 deal_ii_setup_target(elasticity)
 deal_ii_setup_target(laplace)
 deal_ii_setup_target(stokes)
+
+if(BUILD_TESTING)
+  add_executable(pmf_form_tests tests/test_main.cc)
+  deal_ii_setup_target(pmf_form_tests)
+  target_link_libraries(pmf_form_tests Catch2::Catch2WithMain)
+
+  list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+  include(Catch)
+  catch_discover_tests(pmf_form_tests)
+endif()
