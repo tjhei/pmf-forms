@@ -32,23 +32,66 @@ main(int argc, char **argv)
   return session.run(argc, argv);
 }
 
+TEST_CASE("Field tuples assign stable positional identities", "[forms]")
+{
+  using namespace expression_templates;
+
+  const auto [first_trial, second_trial, unused_trial] =
+    trial_functions<ValueShape::scalar,
+                    ValueShape::scalar,
+                    ValueShape::vector>();
+  const auto [first_test, second_test, unused_test] =
+    test_functions<ValueShape::scalar,
+                   ValueShape::scalar,
+                   ValueShape::vector>();
+  STATIC_REQUIRE(decltype(first_trial)::index == 0);
+  STATIC_REQUIRE(decltype(second_trial)::index == 1);
+  STATIC_REQUIRE(decltype(unused_trial)::index == 2);
+  STATIC_REQUIRE(decltype(first_test)::index == 0);
+  STATIC_REQUIRE(decltype(second_test)::index == 1);
+  STATIC_REQUIRE(decltype(unused_test)::index == 2);
+  STATIC_REQUIRE(decltype(unused_trial)::shape == ValueShape::vector);
+  STATIC_REQUIRE(decltype(unused_test)::shape == ValueShape::vector);
+
+  const auto form =
+    integral(second_test * second_trial + first_test * first_trial +
+               second_test * second_trial,
+             dx);
+  using Fields = FormFields<decltype(form)>;
+  STATIC_REQUIRE(Fields::n_trial_fields == 2);
+  STATIC_REQUIRE(Fields::n_test_fields == 2);
+  STATIC_REQUIRE(std::is_same<typename Fields::trial_fields,
+                              TypeList<Trial<0, ValueShape::scalar>,
+                                       Trial<1, ValueShape::scalar>>>::value);
+  STATIC_REQUIRE(std::is_same<typename Fields::test_fields,
+                              TypeList<Test<0, ValueShape::scalar>,
+                                       Test<1, ValueShape::scalar>>>::value);
+  STATIC_REQUIRE(
+    std::is_same<decltype(trial()),
+                 typename std::decay<decltype(first_trial)>::type>::value);
+  STATIC_REQUIRE(
+    std::is_same<decltype(test()),
+                 typename std::decay<decltype(first_test)>::type>::value);
+
+  const auto sparse_form = integral(second_test * second_trial, dx);
+  using SparseFields     = FormFields<decltype(sparse_form)>;
+  STATIC_REQUIRE(std::is_same<typename SparseFields::trial_fields,
+                              TypeList<Trial<1, ValueShape::scalar>>>::value);
+  STATIC_REQUIRE(std::is_same<typename SparseFields::test_fields,
+                              TypeList<Test<1, ValueShape::scalar>>>::value);
+}
+
 TEST_CASE("Stokes form is represented by expression-template types",
           "[forms][stokes]")
 {
-  struct VelocityTag
-  {};
-  struct PressureTag
-  {};
   struct ViscosityTag
   {};
 
   using namespace expression_templates;
 
-  const auto u  = trial<VelocityTag, ValueShape::vector>();
-  const auto p  = trial<PressureTag, ValueShape::scalar>();
-  const auto v  = test<VelocityTag, ValueShape::vector>();
-  const auto q  = test<PressureTag, ValueShape::scalar>();
-  const auto mu = coefficient<ViscosityTag>();
+  const auto [u, p] = trial_functions<ValueShape::vector, ValueShape::scalar>();
+  const auto [v, q] = test_functions<ValueShape::vector, ValueShape::scalar>();
+  const auto mu     = coefficient<ViscosityTag>();
 
   const auto stokes =
     integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx) -
@@ -59,6 +102,27 @@ TEST_CASE("Stokes form is represented by expression-template types",
   STATIC_REQUIRE(StokesFields::n_trial_fields == 2);
   STATIC_REQUIRE(StokesFields::n_test_fields == 2);
   STATIC_REQUIRE(StokesFields::n_coefficients == 1);
+  STATIC_REQUIRE(FormFields<decltype(stokes)>::n_trial_fields == 2);
+  STATIC_REQUIRE(FormFields<decltype((stokes))>::n_test_fields == 2);
+  STATIC_REQUIRE(std::is_same<MatrixFreeOperator<2, 1, decltype(stokes)>,
+                              MatrixFreeOperator<2, 1, StokesForm>>::value);
+  STATIC_REQUIRE(
+    std::is_same<PortableMatrixFreeOperator<2, 1, decltype((stokes))>,
+                 PortableMatrixFreeOperator<2, 1, StokesForm>>::value);
+  const auto reordered =
+    integral(q * div(u), dx) + integral(div(v) * p, dx) -
+    integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx);
+  using ReorderedForm   = typename std::decay<decltype(reordered)>::type;
+  using ReorderedFields = FormFields<ReorderedForm>;
+  STATIC_REQUIRE(std::is_same<typename StokesFields::trial_fields,
+                              typename ReorderedFields::trial_fields>::value);
+  STATIC_REQUIRE(std::is_same<typename StokesFields::test_fields,
+                              typename ReorderedFields::test_fields>::value);
+  const auto viscosity = bind_coefficient<ViscosityTag>(1.0);
+  StokesQuadratureKernel<2,
+                         ReorderedForm,
+                         typename std::decay<decltype(viscosity)>::type>
+    reordered_kernel(reordered, viscosity);
   static_assert(internal::FieldRequirements<StokesForm, decltype(u)>::gradient,
                 "velocity trial must require gradients");
   static_assert(internal::FieldRequirements<StokesForm, decltype(p)>::value,
@@ -76,10 +140,6 @@ TEST_CASE("Stokes form is represented by expression-template types",
 TEST_CASE("Expression-template forms retain their structure in types",
           "[forms][expression-templates]")
 {
-  struct DisplacementTag
-  {};
-  struct TestFunctionTag
-  {};
   struct LambdaTag
   {};
   struct MuTag
@@ -87,8 +147,8 @@ TEST_CASE("Expression-template forms retain their structure in types",
 
   using namespace expression_templates;
 
-  const auto u      = trial<DisplacementTag, ValueShape::vector>();
-  const auto v      = test<TestFunctionTag, ValueShape::vector>();
+  const auto u      = trial<ValueShape::vector>();
+  const auto v      = test<ValueShape::vector>();
   const auto lambda = coefficient<LambdaTag>();
   const auto mu     = coefficient<MuTag>();
 
@@ -124,18 +184,14 @@ TEST_CASE("Expression-template forms retain their structure in types",
 TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
           "[forms][laplace]")
 {
-  struct ScalarTag
-  {};
-  struct TestTag
-  {};
   struct CoefficientTag
   {};
   struct ReactionTag
   {};
   using namespace expression_templates;
 
-  const auto u             = trial<ScalarTag, ValueShape::scalar>();
-  const auto v             = test<TestTag, ValueShape::scalar>();
+  const auto u             = trial<ValueShape::scalar>();
+  const auto v             = test<ValueShape::scalar>();
   const auto unit_form     = integral(inner(grad(v), grad(u)), dx);
   const auto alpha         = coefficient<CoefficientTag>();
   const auto weighted_form = integral(alpha * inner(grad(v), grad(u)), dx);
@@ -188,10 +244,6 @@ TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
 TEST_CASE("One expression-template form drives both MatrixFree backends",
           "[forms][matrix-free]")
 {
-  struct DisplacementTag
-  {};
-  struct TestFunctionTag
-  {};
   struct LambdaTag
   {};
   struct MuTag
@@ -201,9 +253,16 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   constexpr int dim       = 2;
   constexpr int fe_degree = 1;
 
-  const auto u    = trial<DisplacementTag, ValueShape::vector>();
-  const auto v    = test<TestFunctionTag, ValueShape::vector>();
+  const auto u    = trial<ValueShape::vector>();
+  const auto v    = test<ValueShape::vector>();
   const auto form = integral(inner(sym(grad(v)), sym(grad(u))), dx);
+  using Form      = std::decay_t<decltype(form)>;
+  STATIC_REQUIRE(
+    std::is_same<MatrixFreeOperator<dim, fe_degree, decltype(form)>,
+                 MatrixFreeOperator<dim, fe_degree, Form>>::value);
+  STATIC_REQUIRE(
+    std::is_same<PortableMatrixFreeOperator<dim, fe_degree, decltype((form))>,
+                 PortableMatrixFreeOperator<dim, fe_degree, Form>>::value);
 
   dealii::parallel::distributed::Triangulation<dim> triangulation(
     MPI_COMM_WORLD);
@@ -230,13 +289,12 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   cpu_data->reinit(
     mapping, dof_handler, constraints, quadrature, cpu_additional_data);
 
-  using CpuOperator =
-    MatrixFreeOperator<dim,
-                       fe_degree,
-                       typename std::decay<decltype(form)>::type>;
-  const CpuOperator            cpu_operator(cpu_data, form);
-  typename CpuOperator::Vector cpu_source;
-  typename CpuOperator::Vector cpu_destination;
+  std::shared_ptr<const dealii::MatrixFree<dim, double>> const_cpu_data =
+    cpu_data;
+  const auto cpu_operator =
+    make_matrix_free_operator<dim, fe_degree>(const_cpu_data, form);
+  typename decltype(cpu_operator)::Vector cpu_source;
+  typename decltype(cpu_operator)::Vector cpu_destination;
   cpu_operator.initialize_dof_vector(cpu_source);
   cpu_operator.initialize_dof_vector(cpu_destination);
   cpu_source = 0.0;
@@ -254,13 +312,10 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   portable_data->reinit(
     mapping, dof_handler, constraints, quadrature, portable_additional_data);
 
-  using PortableOperator =
-    PortableMatrixFreeOperator<dim,
-                               fe_degree,
-                               typename std::decay<decltype(form)>::type>;
-  const PortableOperator            portable_operator(portable_data, form);
-  typename PortableOperator::Vector portable_source;
-  typename PortableOperator::Vector portable_destination;
+  const auto portable_operator =
+    make_portable_matrix_free_operator<dim, fe_degree>(portable_data, form);
+  typename decltype(portable_operator)::Vector portable_source;
+  typename decltype(portable_operator)::Vector portable_destination;
   portable_operator.initialize_dof_vector(portable_source);
   portable_operator.initialize_dof_vector(portable_destination);
 
@@ -284,10 +339,6 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
 TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
           "[forms][matrix-free][laplace]")
 {
-  struct UTag
-  {};
-  struct VTag
-  {};
   struct AlphaTag
   {};
   struct BetaTag
@@ -296,8 +347,8 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   constexpr int dim    = 2;
   constexpr int degree = 1;
 
-  const auto u     = trial<UTag, ValueShape::scalar>();
-  const auto v     = test<VTag, ValueShape::scalar>();
+  const auto u     = trial<ValueShape::scalar>();
+  const auto v     = test<ValueShape::scalar>();
   const auto alpha = coefficient<AlphaTag>();
   const auto beta  = coefficient<BetaTag>();
   const auto form =
@@ -325,12 +376,13 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
     dealii::update_gradients | dealii::update_JxW_values;
   cpu_data->reinit(
     mapping, dof_handler, constraints, quadrature, cpu_additional_data);
-  using FormType    = typename std::decay<decltype(form)>::type;
-  using BindingType = typename std::decay<decltype(binding)>::type;
-  MatrixFreeOperator<dim, degree, FormType, BindingType> cpu_op(cpu_data,
-                                                                form,
-                                                                binding);
-  dealii::LinearAlgebra::distributed::Vector<double>     cpu_src, cpu_dst;
+  auto cpu_op = make_matrix_free_operator<dim, degree>(cpu_data, form, binding);
+  STATIC_REQUIRE(
+    std::is_same<
+      decltype(cpu_op),
+      MatrixFreeOperator<dim, degree, decltype((form)), decltype((binding))>>::
+      value);
+  dealii::LinearAlgebra::distributed::Vector<double> cpu_src, cpu_dst;
   cpu_op.initialize_dof_vector(cpu_src);
   cpu_op.initialize_dof_vector(cpu_dst);
   cpu_src = 0.0;
@@ -340,9 +392,8 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   cpu_op.vmult(cpu_dst, cpu_src);
 
   const auto unit_form = integral(inner(grad(v), grad(u)) + v * u, dx);
-  using UnitFormType   = typename std::decay<decltype(unit_form)>::type;
-  MatrixFreeOperator<dim, degree, UnitFormType>      cpu_unit_op(cpu_data,
-                                                            unit_form);
+  auto       cpu_unit_op =
+    make_matrix_free_operator<dim, degree>(cpu_data, unit_form);
   dealii::LinearAlgebra::distributed::Vector<double> cpu_unit_dst;
   cpu_unit_op.initialize_dof_vector(cpu_unit_dst);
   cpu_unit_op.vmult(cpu_unit_dst, cpu_src);
@@ -355,11 +406,11 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
     dealii::update_gradients | dealii::update_JxW_values;
   portable_data->reinit(
     mapping, dof_handler, constraints, quadrature, portable_additional_data);
-  PortableMatrixFreeOperator<dim, degree, FormType, BindingType> portable_op(
-    portable_data, form, binding);
-  typename PortableMatrixFreeOperator<dim, degree, FormType, BindingType>::
-    Vector portable_src,
-    portable_dst;
+  auto portable_op =
+    make_portable_matrix_free_operator<dim, degree>(portable_data,
+                                                    form,
+                                                    binding);
+  typename decltype(portable_op)::Vector portable_src, portable_dst;
   portable_op.initialize_dof_vector(portable_src);
   portable_op.initialize_dof_vector(portable_dst);
   using HostVector =
@@ -374,10 +425,9 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   portable_src.import_elements(host_src, dealii::VectorOperation::insert);
   portable_op.vmult(portable_dst, portable_src);
 
-  PortableMatrixFreeOperator<dim, degree, UnitFormType> portable_unit_op(
-    portable_data, unit_form);
-  typename PortableMatrixFreeOperator<dim, degree, UnitFormType>::Vector
-    portable_unit_src,
+  auto portable_unit_op =
+    make_portable_matrix_free_operator<dim, degree>(portable_data, unit_form);
+  typename decltype(portable_unit_op)::Vector portable_unit_src,
     portable_unit_dst;
   portable_unit_op.initialize_dof_vector(portable_unit_src);
   portable_unit_op.initialize_dof_vector(portable_unit_dst);

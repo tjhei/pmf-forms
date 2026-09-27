@@ -22,7 +22,6 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
-#include <type_traits>
 
 int
 main(int argc, char **argv)
@@ -36,27 +35,19 @@ main(int argc, char **argv)
   using namespace pmf::forms;
   using namespace pmf::forms::expression_templates;
 
-  struct VelocityTag
-  {};
-  struct PressureTag
-  {};
   struct ViscosityTag
   {};
 
-  const auto u    = trial<VelocityTag, ValueShape::vector>();
-  const auto p    = trial<PressureTag, ValueShape::scalar>();
-  const auto v    = test<VelocityTag, ValueShape::vector>();
-  const auto q    = test<PressureTag, ValueShape::scalar>();
-  const auto mu   = coefficient<ViscosityTag>();
+  const auto [u, p] = trial_functions<ValueShape::vector, ValueShape::scalar>();
+  const auto [v, q] = test_functions<ValueShape::vector, ValueShape::scalar>();
+  const auto mu     = coefficient<ViscosityTag>();
   const auto form = integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx) -
                     integral(div(v) * p, dx) - integral(q * div(u), dx);
   const auto bindings = bind_coefficient<ViscosityTag>(1.7);
-  using Form          = typename std::decay<decltype(form)>::type;
-  using Coefficients  = typename std::decay<decltype(bindings)>::type;
 
-  static_assert(FormFields<Form>::n_trial_fields == 2,
+  static_assert(FormFields<decltype(form)>::n_trial_fields == 2,
                 "Stokes requires two trial fields");
-  static_assert(FormFields<Form>::n_test_fields == 2,
+  static_assert(FormFields<decltype(form)>::n_test_fields == 2,
                 "Stokes requires two test fields");
 
   dealii::parallel::distributed::Triangulation<dim> triangulation(
@@ -98,10 +89,10 @@ main(int argc, char **argv)
   cpu_data->reinit(
     mapping, dof_handlers, constraints, quadrature, cpu_additional_data);
 
-  using CpuOperator = MatrixFreeOperator<dim, degree, Form, Coefficients>;
-  const CpuOperator            cpu_operator(cpu_data, form, bindings);
-  typename CpuOperator::Vector cpu_source;
-  typename CpuOperator::Vector cpu_result;
+  const auto cpu_operator =
+    make_matrix_free_operator<dim, degree>(cpu_data, form, bindings);
+  typename decltype(cpu_operator)::Vector cpu_source;
+  typename decltype(cpu_operator)::Vector cpu_result;
   cpu_operator.initialize_dof_vector(cpu_source);
   cpu_operator.initialize_dof_vector(cpu_result);
   for (unsigned int block = 0; block < cpu_source.n_blocks(); ++block)
@@ -123,11 +114,12 @@ main(int argc, char **argv)
   portable_data->reinit(
     mapping, dof_handlers, constraints, quadrature, portable_additional_data);
 
-  using PortableOperator =
-    PortableMatrixFreeOperator<dim, degree, Form, Coefficients>;
-  const PortableOperator portable_operator(portable_data, form, bindings);
-  typename PortableOperator::Vector portable_source;
-  typename PortableOperator::Vector portable_result;
+  const auto portable_operator =
+    make_portable_matrix_free_operator<dim, degree>(portable_data,
+                                                    form,
+                                                    bindings);
+  typename decltype(portable_operator)::Vector portable_source;
+  typename decltype(portable_operator)::Vector portable_result;
   portable_operator.initialize_dof_vector(portable_source);
   portable_operator.initialize_dof_vector(portable_result);
 

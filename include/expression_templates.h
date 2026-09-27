@@ -3,6 +3,7 @@
 
 #include <form_types.h>
 
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -13,34 +14,30 @@ namespace pmf
     /** @brief Compile-time expression types used to build form descriptions. */
     namespace expression_templates
     {
-      namespace internal
-      {
-        struct DefaultTrialTag
-        {};
-        struct DefaultTestTag
-        {};
-      } // namespace internal
-
       /**
-       * @brief A formal trial field identified by a user-provided tag type.
-       * @tparam Tag A unique C++ type identifying the field.
+       * @brief A formal trial field identified by its position in a field tuple.
+       * @tparam Index The zero-based field number.
        * @tparam Shape The compile-time value shape of the field.
        */
-      template <typename Tag, ValueShape Shape>
+      template <unsigned int Index, ValueShape Shape>
       struct Trial
       {
-        static constexpr ValueShape shape = Shape;
+        /** @brief Zero-based field/block number. */
+        static constexpr unsigned int index = Index;
+        static constexpr ValueShape   shape = Shape;
       };
 
       /**
-       * @brief A formal test field identified by a user-provided tag type.
-       * @tparam Tag A unique C++ type identifying the field.
+       * @brief A formal test field identified by its position in a field tuple.
+       * @tparam Index The zero-based field number.
        * @tparam Shape The compile-time value shape of the field.
        */
-      template <typename Tag, ValueShape Shape>
+      template <unsigned int Index, ValueShape Shape>
       struct Test
       {
-        static constexpr ValueShape shape = Shape;
+        /** @brief Zero-based field/block number. */
+        static constexpr unsigned int index = Index;
+        static constexpr ValueShape   shape = Shape;
       };
 
       /** @brief A scalar coefficient identified by a user-provided tag type. */
@@ -149,11 +146,11 @@ namespace pmf
       struct IsExpression : std::false_type
       {};
 
-      template <typename Tag, ValueShape Shape>
-      struct IsExpression<Trial<Tag, Shape>> : std::true_type
+      template <unsigned int Index, ValueShape Shape>
+      struct IsExpression<Trial<Index, Shape>> : std::true_type
       {};
-      template <typename Tag, ValueShape Shape>
-      struct IsExpression<Test<Tag, Shape>> : std::true_type
+      template <unsigned int Index, ValueShape Shape>
+      struct IsExpression<Test<Index, Shape>> : std::true_type
       {};
       template <typename Tag>
       struct IsExpression<Coefficient<Tag>> : std::true_type
@@ -268,6 +265,44 @@ namespace pmf
             typename TypeListMergeUnique<appended, TypeList<Rest...>>::type;
         };
 
+        template <typename Field, typename List>
+        struct InsertField;
+
+        template <typename Field>
+        struct InsertField<Field, TypeList<>>
+        {
+          using type = TypeList<Field>;
+        };
+
+        template <typename Field, typename First, typename... Rest>
+        struct InsertField<Field, TypeList<First, Rest...>>
+        {
+          static_assert(Field::index != First::index,
+                        "a field index must have a consistent value shape");
+          using tail = typename InsertField<Field, TypeList<Rest...>>::type;
+          using type = typename std::conditional<
+            (Field::index < First::index),
+            TypeList<Field, First, Rest...>,
+            typename TypeListMergeUnique<TypeList<First>, tail>::type>::type;
+        };
+
+        template <typename List>
+        struct SortFields;
+
+        template <>
+        struct SortFields<TypeList<>>
+        {
+          using type = TypeList<>;
+        };
+
+        template <typename First, typename... Rest>
+        struct SortFields<TypeList<First, Rest...>>
+        {
+          using type = typename InsertField<
+            First,
+            typename SortFields<TypeList<Rest...>>::type>::type;
+        };
+
         template <typename Expression>
         struct FieldAnalysis
         {
@@ -276,19 +311,19 @@ namespace pmf
           using coefficient_tags = TypeList<>;
         };
 
-        template <typename Tag, ValueShape Shape>
-        struct FieldAnalysis<Trial<Tag, Shape>>
+        template <unsigned int Index, ValueShape Shape>
+        struct FieldAnalysis<Trial<Index, Shape>>
         {
-          using trial_fields     = TypeList<Trial<Tag, Shape>>;
+          using trial_fields     = TypeList<Trial<Index, Shape>>;
           using test_fields      = TypeList<>;
           using coefficient_tags = TypeList<>;
         };
 
-        template <typename Tag, ValueShape Shape>
-        struct FieldAnalysis<Test<Tag, Shape>>
+        template <unsigned int Index, ValueShape Shape>
+        struct FieldAnalysis<Test<Index, Shape>>
         {
           using trial_fields     = TypeList<>;
-          using test_fields      = TypeList<Test<Tag, Shape>>;
+          using test_fields      = TypeList<Test<Index, Shape>>;
           using coefficient_tags = TypeList<>;
         };
 
@@ -343,15 +378,15 @@ namespace pmf
           static constexpr bool gradient = false;
         };
 
-        template <typename Tag, ValueShape Shape>
-        struct FieldRequirementsImpl<Trial<Tag, Shape>, Trial<Tag, Shape>>
+        template <unsigned int Index, ValueShape Shape>
+        struct FieldRequirementsImpl<Trial<Index, Shape>, Trial<Index, Shape>>
         {
           static constexpr bool value    = true;
           static constexpr bool gradient = false;
         };
 
-        template <typename Tag, ValueShape Shape>
-        struct FieldRequirementsImpl<Test<Tag, Shape>, Test<Tag, Shape>>
+        template <unsigned int Index, ValueShape Shape>
+        struct FieldRequirementsImpl<Test<Index, Shape>, Test<Index, Shape>>
         {
           static constexpr bool value    = true;
           static constexpr bool gradient = false;
@@ -406,68 +441,106 @@ namespace pmf
 
         template <typename Expression, typename Field>
         struct FieldRequirements
-          : FieldRequirementsImpl<Expression, typename std::decay<Field>::type>
+          : FieldRequirementsImpl<std::decay_t<Expression>, std::decay_t<Field>>
         {};
       } // namespace internal
 
       /**
        * @brief Compile-time trial/test fields and evaluation needs of a form.
+       * @tparam Form A form type; const and reference qualifiers are ignored.
        *
-       * `trial_fields` and `test_fields` are unique type lists. Query
-       * `internal::FieldRequirements<Form, Field>` for value/gradient use.
+       * `trial_fields` and `test_fields` are unique type lists sorted by field
+       * index, independent of expression order. Unused indices are omitted.
+       * Query `internal::FieldRequirements<Form, Field>` for value/gradient
+       * use.
        */
       template <typename Form>
-      struct FormFields : internal::FieldAnalysis<Form>
+      struct FormFields : internal::FieldAnalysis<std::decay_t<Form>>
       {
-        static constexpr unsigned int n_trial_fields = internal::TypeListSize<
-          typename internal::FieldAnalysis<Form>::trial_fields>::value;
-        static constexpr unsigned int n_test_fields = internal::TypeListSize<
-          typename internal::FieldAnalysis<Form>::test_fields>::value;
-        using coefficient_tags =
-          typename internal::FieldAnalysis<Form>::coefficient_tags;
+        using trial_fields =
+          typename internal::SortFields<typename internal::FieldAnalysis<
+            std::decay_t<Form>>::trial_fields>::type;
+        using test_fields =
+          typename internal::SortFields<typename internal::FieldAnalysis<
+            std::decay_t<Form>>::test_fields>::type;
+        static constexpr unsigned int n_trial_fields =
+          internal::TypeListSize<typename internal::FieldAnalysis<
+            std::decay_t<Form>>::trial_fields>::value;
+        static constexpr unsigned int n_test_fields =
+          internal::TypeListSize<typename internal::FieldAnalysis<
+            std::decay_t<Form>>::test_fields>::value;
+        using coefficient_tags = typename internal::FieldAnalysis<
+          std::decay_t<Form>>::coefficient_tags;
         static constexpr unsigned int n_coefficients =
           internal::TypeListSize<coefficient_tags>::value;
       };
 
-      /** @brief Create a typed formal trial field. */
-      template <typename Tag, ValueShape Shape>
-      constexpr Trial<Tag, Shape>
+      namespace internal
+      {
+        template <ValueShape... Shapes, std::size_t... Indices>
+        constexpr auto
+        make_trial_functions(std::index_sequence<Indices...>)
+        {
+          return std::tuple<Trial<Indices, Shapes>...>{};
+        }
+
+        template <ValueShape... Shapes, std::size_t... Indices>
+        constexpr auto
+        make_test_functions(std::index_sequence<Indices...>)
+        {
+          return std::tuple<Test<Indices, Shapes>...>{};
+        }
+      } // namespace internal
+
+      /**
+       * @brief Create trial fields numbered by position, starting at zero.
+       * @tparam Shapes The value shapes in field/block order.
+       * @return A tuple of symbols with the requested shapes and indices.
+       * Each call restarts numbering; matching trial/test positions identify
+       * the same field/block number.
+       */
+      template <ValueShape... Shapes>
+      constexpr auto
+      trial_functions()
+      {
+        return internal::make_trial_functions<Shapes...>(
+          std::make_index_sequence<sizeof...(Shapes)>{});
+      }
+
+      /**
+       * @brief Create trial field zero for a single-field form.
+       * @tparam Shape The value shape, scalar by default.
+       * @return The trial symbol at index zero.
+       */
+      template <ValueShape Shape = ValueShape::scalar>
+      constexpr Trial<0, Shape>
       trial()
       {
         return {};
       }
 
       /**
-       * @brief Create the default formal trial field without a user tag.
-       * @tparam Shape The compile-time value shape, scalar by default.
-       *
-       * This shorthand is intended for forms with one trial field. Give fields
-       * explicit tags when a form contains multiple trial arguments.
+       * @brief Create test fields numbered by position, starting at zero.
+       * @tparam Shapes The value shapes in field/block order.
+       * @return A tuple of symbols with the requested shapes and indices.
+       * Each call restarts numbering; matching trial/test positions identify
+       * the same field/block number.
        */
-      template <ValueShape Shape = ValueShape::scalar>
-      constexpr Trial<internal::DefaultTrialTag, Shape>
-      trial()
+      template <ValueShape... Shapes>
+      constexpr auto
+      test_functions()
       {
-        return {};
-      }
-
-      /** @brief Create a typed formal test field. */
-      template <typename Tag, ValueShape Shape>
-      constexpr Test<Tag, Shape>
-      test()
-      {
-        return {};
+        return internal::make_test_functions<Shapes...>(
+          std::make_index_sequence<sizeof...(Shapes)>{});
       }
 
       /**
-       * @brief Create the default formal test field without a user tag.
-       * @tparam Shape The compile-time value shape, scalar by default.
-       *
-       * This shorthand is intended for forms with one test field. Give fields
-       * explicit tags when a form contains multiple test arguments.
+       * @brief Create test field zero for a single-field form.
+       * @tparam Shape The value shape, scalar by default.
+       * @return The test symbol at index zero.
        */
       template <ValueShape Shape = ValueShape::scalar>
-      constexpr Test<internal::DefaultTestTag, Shape>
+      constexpr Test<0, Shape>
       test()
       {
         return {};
@@ -635,7 +708,7 @@ namespace pmf
         return FormDifference<Left, Right>{std::move(left), std::move(right)};
       }
     } // namespace expression_templates
-  }   // namespace forms
+  } // namespace forms
 } // namespace pmf
 
 #endif // PMF_FORM_EXPRESSION_TEMPLATES_H

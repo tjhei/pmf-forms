@@ -180,12 +180,12 @@ namespace pmf
         template <int dim,
                   typename Number,
                   typename Coefficients,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_scalar_term(
-          const Integral<Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
-                               Gradient<Trial<TrialTag, ValueShape::scalar>>>>
+          const Integral<Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
+                               Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
             &,
           const Tensor<1, dim, Number> &gradient,
           Tensor<1, dim, Number>       &flux,
@@ -197,16 +197,16 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename CoefficientTag,
                   typename BindingNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_term(
           const Integral<
             Multiply<Coefficient<CoefficientTag>,
-                     Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
-                           Gradient<Trial<TrialTag, ValueShape::scalar>>>>> &,
+                     Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
+                           Gradient<Trial<TrialIndex, ValueShape::scalar>>>>> &,
           const Tensor<1, dim, Number>                            &gradient,
           Tensor<1, dim, Number>                                  &flux,
           const CoefficientBinding<CoefficientTag, BindingNumber> &coefficient,
@@ -281,12 +281,12 @@ namespace pmf
         template <int dim,
                   typename Number,
                   typename Coefficients,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
-          const Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
-                      Gradient<Trial<TrialTag, ValueShape::scalar>>> &,
+          const Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
+                      Gradient<Trial<TrialIndex, ValueShape::scalar>>> &,
           const Number,
           const Tensor<1, dim, Number> &gradient,
           Number &,
@@ -300,14 +300,14 @@ namespace pmf
         template <int dim,
                   typename Number,
                   typename Coefficients,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename ConstantNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Constant<ConstantNumber>,
-                         Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
-                               Gradient<Trial<TrialTag, ValueShape::scalar>>>>
+                         Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
+                               Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
             &expression,
           const Number,
           const Tensor<1, dim, Number> &gradient,
@@ -321,15 +321,15 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename CoefficientTag,
                   typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Coefficient<CoefficientTag>,
-                         Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
-                               Gradient<Trial<TrialTag, ValueShape::scalar>>>>
+                         Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
+                               Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
             &,
           const Number,
           const Tensor<1, dim, Number> &gradient,
@@ -346,12 +346,12 @@ namespace pmf
         template <int dim,
                   typename Number,
                   typename Coefficients,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
-          const Multiply<Test<TestTag, ValueShape::scalar>,
-                         Trial<TrialTag, ValueShape::scalar>> &,
+          const Multiply<Test<TestIndex, ValueShape::scalar>,
+                         Trial<TrialIndex, ValueShape::scalar>> &,
           const Number value,
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
@@ -364,15 +364,15 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename ConstantNumber,
                   typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Constant<ConstantNumber>,
-                         Multiply<Test<TestTag, ValueShape::scalar>,
-                                  Trial<TrialTag, ValueShape::scalar>>>
+                         Multiply<Test<TestIndex, ValueShape::scalar>,
+                                  Trial<TrialIndex, ValueShape::scalar>>>
                       &constant,
           const Number value,
           const Tensor<1, dim, Number> &,
@@ -386,15 +386,15 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename ConstantNumber,
                   typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
-          const Multiply<Test<TestTag, ValueShape::scalar>,
+          const Multiply<Test<TestIndex, ValueShape::scalar>,
                          Multiply<Constant<ConstantNumber>,
-                                  Trial<TrialTag, ValueShape::scalar>>>
+                                  Trial<TrialIndex, ValueShape::scalar>>>
                       &expression,
           const Number value,
           const Tensor<1, dim, Number> &,
@@ -409,16 +409,16 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename ConstantNumber,
                   typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Multiply<Constant<ConstantNumber>,
-                                  Test<TestTag, ValueShape::scalar>>,
-                         Trial<TrialTag, ValueShape::scalar>> &expression,
-          const Number                                         value,
+                                  Test<TestIndex, ValueShape::scalar>>,
+                         Trial<TrialIndex, ValueShape::scalar>> &expression,
+          const Number                                           value,
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
@@ -431,15 +431,15 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename CoefficientTag,
                   typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Coefficient<CoefficientTag>,
-                         Multiply<Test<TestTag, ValueShape::scalar>,
-                                  Trial<TrialTag, ValueShape::scalar>>> &,
+                         Multiply<Test<TestIndex, ValueShape::scalar>,
+                                  Trial<TrialIndex, ValueShape::scalar>>> &,
           const Number value,
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
@@ -454,15 +454,15 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename TestTag,
-                  typename TrialTag,
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex,
                   typename CoefficientTag,
                   typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Multiply<Coefficient<CoefficientTag>,
-                                  Test<TestTag, ValueShape::scalar>>,
-                         Trial<TrialTag, ValueShape::scalar>> &,
+                                  Test<TestIndex, ValueShape::scalar>>,
+                         Trial<TrialIndex, ValueShape::scalar>> &,
           const Number value,
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
@@ -677,13 +677,14 @@ namespace pmf
         template <int dim,
                   typename Number,
                   typename Coefficients,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<
-            Inner<Symmetrize<Gradient<Test<TestTag, ValueShape::vector>>>,
-                  Symmetrize<Gradient<Trial<TrialTag, ValueShape::vector>>>>> &,
+            Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
+                  Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>
+            &,
           const Tensor<2, dim, Number> &gradient,
           Tensor<2, dim, Number>       &stress,
           const Coefficients &,
@@ -737,14 +738,14 @@ namespace pmf
                   typename Coefficients,
                   typename ConstantNumber,
                   typename MuTag,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<Multiply<
             Multiply<Constant<ConstantNumber>, Coefficient<MuTag>>,
-            Inner<Symmetrize<Gradient<Test<TestTag, ValueShape::vector>>>,
-                  Symmetrize<Gradient<Trial<TrialTag, ValueShape::vector>>>>>>
+            Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
+                  Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>>
             &,
           const Tensor<2, dim, Number> &,
           Tensor<2, dim, Number> &,
@@ -755,14 +756,14 @@ namespace pmf
                   typename Number,
                   typename Coefficients,
                   typename LambdaTag,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<
             Multiply<Multiply<Coefficient<LambdaTag>,
-                              Divergence<Test<TestTag, ValueShape::vector>>>,
-                     Divergence<Trial<TrialTag, ValueShape::vector>>>> &,
+                              Divergence<Test<TestIndex, ValueShape::vector>>>,
+                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &,
           const Tensor<2, dim, Number> &,
           Tensor<2, dim, Number> &,
           const Coefficients &,
@@ -835,14 +836,14 @@ namespace pmf
                   typename Coefficients,
                   typename ConstantNumber,
                   typename MuTag,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<Multiply<
             Multiply<Constant<ConstantNumber>, Coefficient<MuTag>>,
-            Inner<Symmetrize<Gradient<Test<TestTag, ValueShape::vector>>>,
-                  Symmetrize<Gradient<Trial<TrialTag, ValueShape::vector>>>>>>
+            Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
+                  Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>>
                                        &form,
           const Tensor<2, dim, Number> &gradient,
           Tensor<2, dim, Number>       &stress,
@@ -863,14 +864,14 @@ namespace pmf
                   typename Number,
                   typename Coefficients,
                   typename LambdaTag,
-                  typename TestTag,
-                  typename TrialTag>
+                  unsigned int TestIndex,
+                  unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<
             Multiply<Multiply<Coefficient<LambdaTag>,
-                              Divergence<Test<TestTag, ValueShape::vector>>>,
-                     Divergence<Trial<TrialTag, ValueShape::vector>>>> &,
+                              Divergence<Test<TestIndex, ValueShape::vector>>>,
+                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &,
           const Tensor<2, dim, Number> &gradient,
           Tensor<2, dim, Number>       &stress,
           const Coefficients           &coefficients,
@@ -993,6 +994,10 @@ namespace pmf
               Pressure::shape == ValueShape::scalar &&
               TestPressure::shape == ValueShape::scalar,
             "Stokes fields must be vector velocity and scalar pressure");
+          static_assert(Velocity::index == 0 && TestVelocity::index == 0 &&
+                          Pressure::index == 1 && TestPressure::index == 1,
+                        "the Stokes kernel expects velocity at index 0 and "
+                        "pressure at index 1");
           static_assert(
             Analysis::n_coefficients == 1,
             "the current Stokes kernel expects one viscosity symbol");
@@ -1465,15 +1470,15 @@ namespace pmf
           static constexpr ValueShape shape = ValueShape::scalar;
         };
 
-        template <typename Tag, ValueShape Shape>
-        struct FormFieldInfo<Trial<Tag, Shape>>
+        template <unsigned int Index, ValueShape Shape>
+        struct FormFieldInfo<Trial<Index, Shape>>
         {
           static constexpr bool       found = true;
           static constexpr ValueShape shape = Shape;
         };
 
-        template <typename Tag, ValueShape Shape>
-        struct FormFieldInfo<Test<Tag, Shape>>
+        template <unsigned int Index, ValueShape Shape>
+        struct FormFieldInfo<Test<Index, Shape>>
         {
           static constexpr bool       found = true;
           static constexpr ValueShape shape = Shape;
@@ -1514,72 +1519,127 @@ namespace pmf
        * @brief CPU MatrixFree operator selected from the form's field shape.
        *
        * Scalar forms use scalar FEEvaluation. Vector forms use dim components.
+       * Const and reference qualifiers on forms and bindings are ignored.
        */
       template <int dim,
                 int fe_degree,
                 typename Form,
                 typename Coefficients = NoCoefficients,
                 typename VectorType   = typename std::conditional<
-                  (FormFields<Form>::n_trial_fields > 1),
-                  dealii::LinearAlgebra::distributed::BlockVector<
-                    typename Coefficients::value_type>,
-                  dealii::LinearAlgebra::distributed::Vector<
-                    typename Coefficients::value_type>>::type>
+                    (FormFields<Form>::n_trial_fields > 1),
+                    dealii::LinearAlgebra::distributed::BlockVector<
+                      typename std::decay_t<Coefficients>::value_type>,
+                    dealii::LinearAlgebra::distributed::Vector<
+                      typename std::decay_t<Coefficients>::value_type>>::type>
       using MatrixFreeOperator = typename std::conditional<
         (FormFields<Form>::n_trial_fields > 1),
         MatrixFreeStokesOperator<dim,
                                  fe_degree,
-                                 Form,
-                                 Coefficients,
+                                 std::decay_t<Form>,
+                                 std::decay_t<Coefficients>,
                                  VectorType>,
         typename std::conditional<
-          internal::FormFieldInfo<Form>::shape == ValueShape::scalar,
-          MatrixFreeScalarFormOperator<dim,
-                                       fe_degree,
-                                       Form,
-                                       Coefficients,
-                                       typename Coefficients::value_type,
-                                       VectorType>,
+          internal::FormFieldInfo<std::decay_t<Form>>::shape ==
+            ValueShape::scalar,
+          MatrixFreeScalarFormOperator<
+            dim,
+            fe_degree,
+            std::decay_t<Form>,
+            std::decay_t<Coefficients>,
+            typename std::decay_t<Coefficients>::value_type,
+            VectorType>,
           MatrixFreeFormOperator<dim,
                                  fe_degree,
-                                 Form,
-                                 Coefficients,
+                                 std::decay_t<Form>,
+                                 std::decay_t<Coefficients>,
                                  VectorType>>::type>::type;
 
-      /** @brief Portable::MatrixFree operator selected from the form shape. */
+      /**
+       * @brief Portable::MatrixFree operator selected from the form shape.
+       * Const and reference qualifiers on forms and bindings are ignored.
+       */
       template <int dim,
                 int fe_degree,
                 typename Form,
                 typename Coefficients = NoCoefficients,
                 typename VectorType   = typename std::conditional<
-                  (FormFields<Form>::n_trial_fields > 1),
-                  dealii::LinearAlgebra::distributed::BlockVector<
-                    typename Coefficients::value_type,
-                    dealii::MemorySpace::Default>,
-                  dealii::LinearAlgebra::distributed::Vector<
-                    typename Coefficients::value_type,
-                    dealii::MemorySpace::Default>>::type>
+                    (FormFields<Form>::n_trial_fields > 1),
+                    dealii::LinearAlgebra::distributed::BlockVector<
+                      typename std::decay_t<Coefficients>::value_type,
+                      dealii::MemorySpace::Default>,
+                    dealii::LinearAlgebra::distributed::Vector<
+                      typename std::decay_t<Coefficients>::value_type,
+                      dealii::MemorySpace::Default>>::type>
       using PortableMatrixFreeOperator = typename std::conditional<
         (FormFields<Form>::n_trial_fields > 1),
         PortableMatrixFreeStokesOperator<dim,
                                          fe_degree,
-                                         Form,
-                                         Coefficients,
+                                         std::decay_t<Form>,
+                                         std::decay_t<Coefficients>,
                                          VectorType>,
         typename std::conditional<
-          internal::FormFieldInfo<Form>::shape == ValueShape::scalar,
+          internal::FormFieldInfo<std::decay_t<Form>>::shape ==
+            ValueShape::scalar,
           PortableMatrixFreeScalarFormOperator<
             dim,
             fe_degree,
-            Form,
-            Coefficients,
-            typename Coefficients::value_type,
+            std::decay_t<Form>,
+            std::decay_t<Coefficients>,
+            typename std::decay_t<Coefficients>::value_type,
             VectorType>,
           PortableMatrixFreeFormOperator<dim,
                                          fe_degree,
-                                         Form,
-                                         Coefficients,
+                                         std::decay_t<Form>,
+                                         std::decay_t<Coefficients>,
                                          VectorType>>::type>::type;
+
+      /**
+       * @brief Create a CPU operator with deduced form and coefficient types.
+       * @tparam dim The spatial dimension.
+       * @tparam fe_degree The finite-element degree.
+       * @param data The MatrixFree data, which may be const.
+       * @param form The form expression, copied or moved into the operator.
+       * @param coefficients Constant bindings, if required by the form.
+       * @return The operator selected from the form's field shapes.
+       * Const forms and bindings are accepted and stored as unqualified values.
+       */
+      template <int dim,
+                int fe_degree,
+                typename Data,
+                typename Form,
+                typename Coefficients = NoCoefficients>
+      auto
+      make_matrix_free_operator(std::shared_ptr<Data> data,
+                                Form                  form,
+                                Coefficients          coefficients = {})
+      {
+        return MatrixFreeOperator<dim, fe_degree, Form, Coefficients>(
+          std::move(data), std::move(form), std::move(coefficients));
+      }
+
+      /**
+       * @brief Create a Portable operator with deduced form and binding types.
+       * @tparam dim The spatial dimension.
+       * @tparam fe_degree The finite-element degree.
+       * @param data The mutable Portable::MatrixFree data.
+       * @param form The form expression, copied or moved into the operator.
+       * @param coefficients Constant bindings, if required by the form.
+       * @return The portable operator selected from the form's field shapes.
+       * Const forms and bindings are accepted and stored as unqualified values.
+       */
+      template <int dim,
+                int fe_degree,
+                typename Data,
+                typename Form,
+                typename Coefficients = NoCoefficients>
+      auto
+      make_portable_matrix_free_operator(std::shared_ptr<Data> data,
+                                         Form                  form,
+                                         Coefficients coefficients = {})
+      {
+        return PortableMatrixFreeOperator<dim, fe_degree, Form, Coefficients>(
+          std::move(data), std::move(form), std::move(coefficients));
+      }
 
       /** @brief Backwards-compatible name for the form-driven CPU operator. */
       template <int dim,
@@ -1606,7 +1666,7 @@ namespace pmf
                                        Coefficients,
                                        VectorType>;
     } // namespace expression_templates
-  }   // namespace forms
+  } // namespace forms
 } // namespace pmf
 
 #endif // PMF_FORM_ELASTICITY_MATRIX_FREE_H

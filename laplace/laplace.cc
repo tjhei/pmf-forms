@@ -21,7 +21,6 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
-#include <type_traits>
 
 int
 main(int argc, char **argv)
@@ -43,8 +42,6 @@ main(int argc, char **argv)
   const auto diffusion    = coefficient<DiffusionTag>();
   const auto form         = integral(diffusion * inner(grad(v), grad(u)), dx);
   const auto coefficients = bind_coefficient<DiffusionTag>(2.5);
-  using Form              = typename std::decay<decltype(form)>::type;
-  using Coefficients      = typename std::decay<decltype(coefficients)>::type;
 
   dealii::parallel::distributed::Triangulation<dim> triangulation(
     MPI_COMM_WORLD);
@@ -71,10 +68,10 @@ main(int argc, char **argv)
   cpu_data->reinit(
     mapping, dof_handler, constraints, quadrature, cpu_additional_data);
 
-  using CpuOperator = MatrixFreeOperator<dim, degree, Form, Coefficients>;
-  const CpuOperator            cpu_operator(cpu_data, form, coefficients);
-  typename CpuOperator::Vector cpu_source;
-  typename CpuOperator::Vector cpu_result;
+  const auto cpu_operator =
+    make_matrix_free_operator<dim, degree>(cpu_data, form, coefficients);
+  typename decltype(cpu_operator)::Vector cpu_source;
+  typename decltype(cpu_operator)::Vector cpu_result;
   cpu_operator.initialize_dof_vector(cpu_source);
   cpu_operator.initialize_dof_vector(cpu_result);
   for (unsigned int i = 0; i < cpu_source.locally_owned_size(); ++i)
@@ -91,11 +88,12 @@ main(int argc, char **argv)
   portable_data->reinit(
     mapping, dof_handler, constraints, quadrature, portable_additional_data);
 
-  using PortableOperator =
-    PortableMatrixFreeOperator<dim, degree, Form, Coefficients>;
-  const PortableOperator portable_operator(portable_data, form, coefficients);
-  typename PortableOperator::Vector portable_source;
-  typename PortableOperator::Vector portable_result;
+  const auto portable_operator =
+    make_portable_matrix_free_operator<dim, degree>(portable_data,
+                                                    form,
+                                                    coefficients);
+  typename decltype(portable_operator)::Vector portable_source;
+  typename decltype(portable_operator)::Vector portable_result;
   portable_operator.initialize_dof_vector(portable_source);
   portable_operator.initialize_dof_vector(portable_result);
 

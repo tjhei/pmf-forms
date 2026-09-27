@@ -6,16 +6,17 @@ form can drive either `dealii::MatrixFree` with `FEEvaluation`, or
 `dealii::Portable::MatrixFree` with `Portable::FEEvaluation`.
 
 The goal is to keep the mathematical expression independent of the execution
-backend. A form is passed to `MatrixFreeOperator` or
-`PortableMatrixFreeOperator`; the operator inspects the formal field shapes at
-compile time and selects scalar or vector evaluation.
+backend. A form is passed to `make_matrix_free_operator` or
+`make_portable_matrix_free_operator`; the operator inspects the formal field
+shapes at compile time and selects scalar or vector evaluation.
 
 For a single-field form, `trial()` and `test()` use default scalar symbols;
 write `trial<ValueShape::vector>()` and `test<ValueShape::vector>()` for vector
-fields. For mixed forms, tags name the fields and are shared between a field's
-trial and test symbols. A tag distinguishes fields with the same role and
-shape; a single-field form can use the default symbols. Coefficient tags
-identify independently bound coefficients.
+fields. For mixed forms, `trial_functions<Shapes...>()` and
+`test_functions<Shapes...>()` return tuples numbered from zero in declaration
+order. Matching trial/test positions identify the same field/block; fields
+with the same shape remain distinct. Each call restarts numbering at zero.
+Coefficient tags identify independently bound coefficients.
 
 ## Examples
 
@@ -28,23 +29,26 @@ using namespace pmf::forms::expression_templates;
 auto u = trial();
 auto v = test();
 
-auto laplace = integral(inner(grad(v), grad(u)), dx);
+const auto laplace = integral(inner(grad(v), grad(u)), dx);
 ```
 
-This form has no coefficient binding. The `MatrixFreeOperator` API chooses
+This form has no coefficient binding. The factory deduces its type and chooses
 scalar `FEEvaluation` from the form's trial/test shapes:
 
 ```cpp
-using Form = typename std::decay<decltype(laplace)>::type;
-MatrixFreeOperator<dim, degree, Form> cpu_operator(matrix_free, laplace);
+auto cpu_operator = make_matrix_free_operator<dim, degree>(matrix_free, laplace);
 ```
 
 Use the same form with the portable backend:
 
 ```cpp
-PortableMatrixFreeOperator<dim, degree, Form> portable_operator(
+auto portable_operator = make_portable_matrix_free_operator<dim, degree>(
   portable_matrix_free, laplace);
 ```
+
+Both factories accept const forms and coefficient bindings and store their own
+values. No form-type alias or `std::decay` is needed. Explicit operator aliases
+also accept `decltype(form)`, including const and reference-qualified types.
 
 ### Weighted Helmholtz
 
@@ -65,13 +69,10 @@ auto coefficients = bind_coefficients(
   bind_coefficient<DiffusionTag>(2.0),
   bind_coefficient<ReactionTag>(0.25));
 
-using HelmholtzForm = typename std::decay<decltype(helmholtz)>::type;
-using Coefficients = typename std::decay<decltype(coefficients)>::type;
-
-MatrixFreeOperator<dim, degree, HelmholtzForm, Coefficients> cpu_operator(
+auto cpu_operator = make_matrix_free_operator<dim, degree>(
   matrix_free, helmholtz, coefficients);
-PortableMatrixFreeOperator<dim, degree, HelmholtzForm, Coefficients>
-  portable_operator(portable_matrix_free, helmholtz, coefficients);
+auto portable_operator = make_portable_matrix_free_operator<dim, degree>(
+  portable_matrix_free, helmholtz, coefficients);
 ```
 
 Literal constants can also be written in the form. They are stored in the
@@ -101,18 +102,15 @@ parameters is also available through `elasticity_coefficients`; see
 
 ### Stokes
 
-Mixed forms use compile-time field identities. The expression determines the
-trial/test field lists and whether each field needs values or gradients:
+Mixed forms use positional field identities: velocity is field 0 and pressure
+is field 1. Field lists are sorted by index, independent of expression order.
+The expression determines whether each field needs values or gradients:
 
 ```cpp
-struct VelocityTag;
-struct PressureTag;
 struct ViscosityTag;
 
-auto u  = trial<VelocityTag, ValueShape::vector>();
-auto p  = trial<PressureTag, ValueShape::scalar>();
-auto v  = test<VelocityTag, ValueShape::vector>();
-auto q  = test<PressureTag, ValueShape::scalar>();
+auto [u, p] = trial_functions<ValueShape::vector, ValueShape::scalar>();
+auto [v, q] = test_functions<ValueShape::vector, ValueShape::scalar>();
 auto mu = coefficient<ViscosityTag>();
 
 auto stokes =
