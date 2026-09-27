@@ -51,19 +51,10 @@ deal_ii_setup_target(laplace)
 deal_ii_setup_target(stokes)
 
 file(GLOB_RECURSE PROJECT_FORMAT_FILES CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/elasticity/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/elasticity/*.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/include/*.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/laplace/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/laplace/*.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/reference/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/reference/*.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/stokes/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/stokes/*.cc"
-  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
 )
+list(FILTER PROJECT_FORMAT_FILES EXCLUDE REGEX "/build/")
 add_custom_target(indent
   COMMAND clang-format -i ${PROJECT_FORMAT_FILES}
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -75,6 +66,9 @@ if(BUILD_TESTING)
   add_executable(pmf_form_tests tests/test_main.cc)
   deal_ii_setup_target(pmf_form_tests)
   target_link_libraries(pmf_form_tests Catch2::Catch2WithMain)
+  target_include_directories(pmf_form_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
 
   list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
   include(Catch)
