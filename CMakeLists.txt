@@ -31,6 +31,7 @@ endif()
 deal_ii_initialize_cached_variables()
 project(pmf-form)
 
+
 include(FetchContent)
 include(CTest)
 
@@ -65,12 +66,13 @@ add_custom_target(indent
 if(BUILD_TESTING)
   add_executable(pmf_form_tests tests/test_main.cc)
   deal_ii_setup_target(pmf_form_tests)
-  target_link_libraries(pmf_form_tests Catch2::Catch2WithMain)
+  target_link_libraries(pmf_form_tests Catch2::Catch2)
   target_include_directories(pmf_form_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
 
-  list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
-  include(Catch)
-  catch_discover_tests(pmf_form_tests)
+  add_test(
+    NAME pmf_form_tests
+    COMMAND mpiexec -n 1 $<TARGET_FILE:pmf_form_tests>
+  )
 endif()
