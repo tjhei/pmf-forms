@@ -30,8 +30,8 @@ to this project.
 
 ## Formatting
 
-Format C++ files with `clang-format` before committing changes:
+Format all project `.h` and `.cc` files with the `indent` target:
 
 ```sh
-clang-format -i path/to/file.cc path/to/file.h
+cmake --build build --target indent
 ```

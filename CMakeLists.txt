@@ -50,6 +50,27 @@ deal_ii_setup_target(elasticity)
 deal_ii_setup_target(laplace)
 deal_ii_setup_target(stokes)
 
+file(GLOB_RECURSE PROJECT_FORMAT_FILES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/elasticity/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/elasticity/*.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/*.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/laplace/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/laplace/*.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/reference/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/reference/*.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/stokes/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/stokes/*.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc"
+)
+add_custom_target(indent
+  COMMAND clang-format -i ${PROJECT_FORMAT_FILES}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMENT "Formatting project C++ files with clang-format"
+  VERBATIM
+)
+
 if(BUILD_TESTING)
   add_executable(pmf_form_tests tests/test_main.cc)
   deal_ii_setup_target(pmf_form_tests)
