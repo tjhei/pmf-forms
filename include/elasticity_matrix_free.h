@@ -70,6 +70,91 @@ namespace pmf
         using value_type = double;
       };
 
+      /** @brief A compile-time collection of independently tagged constants. */
+      template <typename... Bindings>
+      struct CoefficientBindings;
+
+      template <typename Binding>
+      struct CoefficientBindings<Binding>
+      {
+        using value_type = typename Binding::value_type;
+        Binding binding;
+      };
+
+      template <typename First, typename Second, typename... Rest>
+      struct CoefficientBindings<First, Second, Rest...>
+      {
+        using value_type = typename First::value_type;
+        First                                first;
+        CoefficientBindings<Second, Rest...> rest;
+      };
+
+      /** @brief Collect separate tagged constants for one form. */
+      template <typename First>
+      constexpr auto
+      bind_coefficients(First first)
+      {
+        return CoefficientBindings<First>{first};
+      }
+
+      template <typename First, typename Second, typename... Rest>
+      constexpr auto
+      bind_coefficients(First first, Second second, Rest... rest)
+      {
+        return CoefficientBindings<First, Second, Rest...>{
+          first, bind_coefficients(second, rest...)};
+      }
+
+      namespace internal
+      {
+        template <typename Tag,
+                  typename BindingTag,
+                  typename Number,
+                  typename std::enable_if<std::is_same<Tag, BindingTag>::value,
+                                          int>::type = 0>
+        DEAL_II_HOST_DEVICE Number
+        coefficient_value(const CoefficientBinding<BindingTag, Number> &binding)
+        {
+          return binding.value;
+        }
+
+        template <typename Tag, typename Binding>
+        DEAL_II_HOST_DEVICE auto
+        coefficient_value(const CoefficientBindings<Binding> &bindings)
+          -> decltype(coefficient_value<Tag>(bindings.binding))
+        {
+          return coefficient_value<Tag>(bindings.binding);
+        }
+
+        template <typename Tag,
+                  typename First,
+                  typename Second,
+                  typename... Rest>
+        DEAL_II_HOST_DEVICE auto
+        coefficient_value(
+          const CoefficientBindings<First, Second, Rest...> &bindings) ->
+          typename std::enable_if<
+            std::is_same<Tag, typename First::tag_type>::value,
+            typename First::value_type>::type
+        {
+          return bindings.first.value;
+        }
+
+        template <typename Tag,
+                  typename First,
+                  typename Second,
+                  typename... Rest>
+        DEAL_II_HOST_DEVICE auto
+        coefficient_value(
+          const CoefficientBindings<First, Second, Rest...> &bindings) ->
+          typename std::enable_if<
+            !std::is_same<Tag, typename First::tag_type>::value,
+            decltype(coefficient_value<Tag>(bindings.rest))>::type
+        {
+          return coefficient_value<Tag>(bindings.rest);
+        }
+      } // namespace internal
+
       template <typename LambdaTag, typename MuTag, typename Number = double>
       constexpr ElasticityCoefficients<LambdaTag, MuTag, Number>
       elasticity_coefficients(Number lambda, Number mu)
@@ -215,6 +300,52 @@ namespace pmf
                   typename Number,
                   typename Coefficients,
                   typename TestTag,
+                  typename TrialTag,
+                  typename ConstantNumber>
+        DEAL_II_HOST_DEVICE void
+        apply_scalar_expression(
+          const Multiply<Constant<ConstantNumber>,
+                         Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
+                               Gradient<Trial<TrialTag, ValueShape::scalar>>>>
+            &expression,
+          const Number,
+          const Tensor<1, dim, Number> &gradient,
+          Number &,
+          Tensor<1, dim, Number> &flux,
+          const Coefficients &,
+          const Number sign)
+        {
+          flux += (sign * Number(expression.left.value)) * gradient;
+        }
+
+        template <int dim,
+                  typename Number,
+                  typename TestTag,
+                  typename TrialTag,
+                  typename CoefficientTag,
+                  typename Coefficients>
+        DEAL_II_HOST_DEVICE void
+        apply_scalar_expression(
+          const Multiply<Coefficient<CoefficientTag>,
+                         Inner<Gradient<Test<TestTag, ValueShape::scalar>>,
+                               Gradient<Trial<TrialTag, ValueShape::scalar>>>>
+            &,
+          const Number,
+          const Tensor<1, dim, Number> &gradient,
+          Number &,
+          Tensor<1, dim, Number> &flux,
+          const Coefficients     &coefficients,
+          const Number            sign)
+        {
+          flux +=
+            (sign * Number(coefficient_value<CoefficientTag>(coefficients))) *
+            gradient;
+        }
+
+        template <int dim,
+                  typename Number,
+                  typename Coefficients,
+                  typename TestTag,
                   typename TrialTag>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
@@ -234,8 +365,75 @@ namespace pmf
                   typename Number,
                   typename TestTag,
                   typename TrialTag,
+                  typename ConstantNumber,
+                  typename Coefficients>
+        DEAL_II_HOST_DEVICE void
+        apply_scalar_expression(
+          const Multiply<Constant<ConstantNumber>,
+                         Multiply<Test<TestTag, ValueShape::scalar>,
+                                  Trial<TrialTag, ValueShape::scalar>>>
+                      &constant,
+          const Number value,
+          const Tensor<1, dim, Number> &,
+          Number &submitted_value,
+          Tensor<1, dim, Number> &,
+          const Coefficients &,
+          const Number sign)
+        {
+          submitted_value += (sign * Number(constant.left.value)) * value;
+        }
+
+        template <int dim,
+                  typename Number,
+                  typename TestTag,
+                  typename TrialTag,
+                  typename ConstantNumber,
+                  typename Coefficients>
+        DEAL_II_HOST_DEVICE void
+        apply_scalar_expression(
+          const Multiply<Test<TestTag, ValueShape::scalar>,
+                         Multiply<Constant<ConstantNumber>,
+                                  Trial<TrialTag, ValueShape::scalar>>>
+                      &expression,
+          const Number value,
+          const Tensor<1, dim, Number> &,
+          Number &submitted_value,
+          Tensor<1, dim, Number> &,
+          const Coefficients &,
+          const Number sign)
+        {
+          submitted_value +=
+            (sign * Number(expression.right.left.value)) * value;
+        }
+
+        template <int dim,
+                  typename Number,
+                  typename TestTag,
+                  typename TrialTag,
+                  typename ConstantNumber,
+                  typename Coefficients>
+        DEAL_II_HOST_DEVICE void
+        apply_scalar_expression(
+          const Multiply<Multiply<Constant<ConstantNumber>,
+                                  Test<TestTag, ValueShape::scalar>>,
+                         Trial<TrialTag, ValueShape::scalar>> &expression,
+          const Number                                         value,
+          const Tensor<1, dim, Number> &,
+          Number &submitted_value,
+          Tensor<1, dim, Number> &,
+          const Coefficients &,
+          const Number sign)
+        {
+          submitted_value +=
+            (sign * Number(expression.left.left.value)) * value;
+        }
+
+        template <int dim,
+                  typename Number,
+                  typename TestTag,
+                  typename TrialTag,
                   typename CoefficientTag,
-                  typename BindingNumber>
+                  typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Coefficient<CoefficientTag>,
@@ -245,10 +443,12 @@ namespace pmf
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const CoefficientBinding<CoefficientTag, BindingNumber> &binding,
-          const Number                                             sign)
+          const Coefficients &coefficients,
+          const Number        sign)
         {
-          submitted_value += sign * Number(binding.value) * value;
+          submitted_value +=
+            sign * Number(coefficient_value<CoefficientTag>(coefficients)) *
+            value;
         }
 
         template <int dim,
@@ -256,7 +456,7 @@ namespace pmf
                   typename TestTag,
                   typename TrialTag,
                   typename CoefficientTag,
-                  typename BindingNumber>
+                  typename Coefficients>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Multiply<Coefficient<CoefficientTag>,
@@ -266,10 +466,12 @@ namespace pmf
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const CoefficientBinding<CoefficientTag, BindingNumber> &binding,
-          const Number                                             sign)
+          const Coefficients &coefficients,
+          const Number        sign)
         {
-          submitted_value += sign * Number(binding.value) * value;
+          submitted_value +=
+            sign * Number(coefficient_value<CoefficientTag>(coefficients)) *
+            value;
         }
 
         template <int dim,

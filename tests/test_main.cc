@@ -120,6 +120,8 @@ TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
   {};
   struct CoefficientTag
   {};
+  struct ReactionTag
+  {};
   using namespace expression_templates;
 
   const auto u             = trial<ScalarTag, ValueShape::scalar>();
@@ -143,6 +145,34 @@ TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
   internal::apply_scalar_form(weighted_form, gradient, flux, binding, 1.0);
   REQUIRE(flux[0] == Catch::Approx(6.0));
   REQUIRE(flux[1] == Catch::Approx(-3.0));
+
+  const auto beta = coefficient<ReactionTag>();
+  const auto weighted_helmholtz =
+    integral(alpha * inner(grad(v), grad(u)) + beta * (v * u), dx);
+  const auto bindings = bind_coefficients(bind_coefficient<CoefficientTag>(2.5),
+                                          bind_coefficient<ReactionTag>(4.0));
+  flux                = 0.0;
+  double submitted_value = 0.0;
+  internal::apply_scalar_form(
+    weighted_helmholtz, 6.0, gradient, submitted_value, flux, bindings, 1.0);
+  REQUIRE(flux[0] == Catch::Approx(5.0));
+  REQUIRE(flux[1] == Catch::Approx(-2.5));
+  REQUIRE(submitted_value == Catch::Approx(24.0));
+
+  const auto literal_helmholtz =
+    integral(2.0 * inner(grad(v), grad(u)) + v * (3.0 * u), dx);
+  flux            = 0.0;
+  submitted_value = 0.0;
+  internal::apply_scalar_form(literal_helmholtz,
+                              6.0,
+                              gradient,
+                              submitted_value,
+                              flux,
+                              NoCoefficients{},
+                              1.0);
+  REQUIRE(flux[0] == Catch::Approx(4.0));
+  REQUIRE(flux[1] == Catch::Approx(-2.0));
+  REQUIRE(submitted_value == Catch::Approx(18.0));
 }
 
 TEST_CASE("One expression-template form drives both MatrixFree backends",
@@ -250,15 +280,20 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   {};
   struct AlphaTag
   {};
+  struct BetaTag
+  {};
   using namespace expression_templates;
   constexpr int dim    = 2;
   constexpr int degree = 1;
 
-  const auto u       = trial<UTag, ValueShape::scalar>();
-  const auto v       = test<VTag, ValueShape::scalar>();
-  const auto alpha   = coefficient<AlphaTag>();
-  const auto form    = integral(inner(grad(v), grad(u)) + alpha * (v * u), dx);
-  const auto binding = bind_coefficient<AlphaTag>(2.5);
+  const auto u     = trial<UTag, ValueShape::scalar>();
+  const auto v     = test<VTag, ValueShape::scalar>();
+  const auto alpha = coefficient<AlphaTag>();
+  const auto beta  = coefficient<BetaTag>();
+  const auto form =
+    integral(alpha * inner(grad(v), grad(u)) + beta * (v * u), dx);
+  const auto binding = bind_coefficients(bind_coefficient<AlphaTag>(2.5),
+                                         bind_coefficient<BetaTag>(1.75));
 
   dealii::parallel::distributed::Triangulation<dim> tria(MPI_COMM_WORLD);
   dealii::GridGenerator::hyper_cube(tria);
