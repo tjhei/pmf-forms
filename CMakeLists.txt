@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 
-find_package(deal.II 9.7.0
+find_package(deal.II 9.8.0
   HINTS ${deal.II_DIR} ${DEAL_II_DIR} ../ ../../ $ENV{DEAL_II_DIR}
   )
 if(NOT ${deal.II_FOUND})
