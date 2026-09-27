@@ -119,6 +119,22 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The elasticity executable applies one unit-weight elasticity form using both
+backends, compares the resulting distributed vectors, and exits with an error
+if their relative difference exceeds the tolerance. For example, run it on two
+MPI ranks with:
+
+```sh
+mpiexec -n 2 ./build/elasticity
+```
+
+The Laplace executable does the same comparison for a scalar diffusion form
+with coefficient `2.5`:
+
+```sh
+mpiexec -n 2 ./build/laplace
+```
+
 Catch2 is fetched by CMake into the build tree. Format project C++ files with:
 
 ```sh

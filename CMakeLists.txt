@@ -44,7 +44,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_executable(elasticity elasticity/elasticity.cc)
+target_include_directories(elasticity PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 add_executable(laplace laplace/laplace.cc)
+target_include_directories(laplace PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 add_executable(stokes stokes/stokes.cc)
 
 deal_ii_setup_target(elasticity)

@@ -17,6 +17,10 @@ Implemented and build-checked:
   elasticity pattern.
 - CPU `dealii::MatrixFree` and `dealii::Portable::MatrixFree` execution for
   the supported forms, using the same form description.
+- A runnable MPI elasticity example that applies both backends to the same
+  distributed vector and checks their relative error.
+- A matching scalar Laplace example that binds a non-unit diffusion
+  coefficient and checks both backends under MPI.
 - Catch2 unit and backend comparison cases.
 
 Still incomplete:
