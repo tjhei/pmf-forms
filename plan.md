@@ -11,6 +11,8 @@ Implemented and build-checked:
 
 - Expression-template symbols, differential operators, algebra, and cell
   integrals.
+- Tag-free default `trial()` / `test()` symbols for single-field forms, with
+  explicit tags retained for multi-field forms.
 - Scalar Laplace and Helmholtz forms, with independently tagged constant
   diffusion and reaction coefficients or literal constants in the form.
 - Unit-weight symmetric-gradient elasticity and the current constant Lamé

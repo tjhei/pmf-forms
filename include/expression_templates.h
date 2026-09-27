@@ -13,6 +13,14 @@ namespace pmf
     /** @brief Compile-time expression types used to build form descriptions. */
     namespace expression_templates
     {
+      namespace internal
+      {
+        struct DefaultTrialTag
+        {};
+        struct DefaultTestTag
+        {};
+      } // namespace internal
+
       /**
        * @brief A formal trial field identified by a user-provided tag type.
        * @tparam Tag A unique C++ type identifying the field.
@@ -196,9 +204,37 @@ namespace pmf
         return {};
       }
 
+      /**
+       * @brief Create the default formal trial field without a user tag.
+       * @tparam Shape The compile-time value shape, scalar by default.
+       *
+       * This shorthand is intended for forms with one trial field. Give fields
+       * explicit tags when a form contains multiple trial arguments.
+       */
+      template <ValueShape Shape = ValueShape::scalar>
+      constexpr Trial<internal::DefaultTrialTag, Shape>
+      trial()
+      {
+        return {};
+      }
+
       /** @brief Create a typed formal test field. */
       template <typename Tag, ValueShape Shape>
       constexpr Test<Tag, Shape>
+      test()
+      {
+        return {};
+      }
+
+      /**
+       * @brief Create the default formal test field without a user tag.
+       * @tparam Shape The compile-time value shape, scalar by default.
+       *
+       * This shorthand is intended for forms with one test field. Give fields
+       * explicit tags when a form contains multiple test arguments.
+       */
+      template <ValueShape Shape = ValueShape::scalar>
+      constexpr Test<internal::DefaultTestTag, Shape>
       test()
       {
         return {};

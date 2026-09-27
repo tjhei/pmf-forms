@@ -36,13 +36,8 @@ main(int argc, char **argv)
   using namespace pmf::forms;
   using namespace pmf::forms::expression_templates;
 
-  struct DisplacementTag
-  {};
-  struct TestDisplacementTag
-  {};
-
-  const auto u    = trial<DisplacementTag, ValueShape::vector>();
-  const auto v    = test<TestDisplacementTag, ValueShape::vector>();
+  const auto u    = trial<ValueShape::vector>();
+  const auto v    = test<ValueShape::vector>();
   const auto form = integral(inner(sym(grad(v)), sym(grad(u))), dx);
   using Form      = typename std::decay<decltype(form)>::type;
 

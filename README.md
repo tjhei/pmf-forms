@@ -10,6 +10,11 @@ backend. A form is passed to `MatrixFreeOperator` or
 `PortableMatrixFreeOperator`; the operator inspects the formal field shapes at
 compile time and selects scalar or vector evaluation.
 
+For a single-field form, `trial()` and `test()` use default scalar symbols;
+write `trial<ValueShape::vector>()` and `test<ValueShape::vector>()` for vector
+fields. Explicit tags remain available when a form has multiple trial/test
+arguments or multiple independently bound coefficients.
+
 ## Examples
 
 ### Scalar Laplace
@@ -18,11 +23,8 @@ compile time and selects scalar or vector evaluation.
 using namespace pmf::forms;
 using namespace pmf::forms::expression_templates;
 
-struct UTag;
-struct VTag;
-
-auto u = trial<UTag, ValueShape::scalar>();
-auto v = test<VTag, ValueShape::scalar>();
+auto u = trial();
+auto v = test();
 
 auto laplace = integral(inner(grad(v), grad(u)), dx);
 ```
@@ -84,11 +86,8 @@ The expression-template syntax also describes the symmetric-gradient form
 with unit weight:
 
 ```cpp
-struct DisplacementTag;
-struct TestDisplacementTag;
-
-auto u = trial<DisplacementTag, ValueShape::vector>();
-auto v = test<TestDisplacementTag, ValueShape::vector>();
+auto u = trial<ValueShape::vector>();
+auto v = test<ValueShape::vector>();
 
 auto elasticity = integral(inner(sym(grad(v)), sym(grad(u))), dx);
 ```

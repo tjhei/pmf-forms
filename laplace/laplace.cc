@@ -35,15 +35,11 @@ main(int argc, char **argv)
   using namespace pmf::forms;
   using namespace pmf::forms::expression_templates;
 
-  struct SolutionTag
-  {};
-  struct TestTag
-  {};
   struct DiffusionTag
   {};
 
-  const auto u            = trial<SolutionTag, ValueShape::scalar>();
-  const auto v            = test<TestTag, ValueShape::scalar>();
+  const auto u            = trial();
+  const auto v            = test();
   const auto diffusion    = coefficient<DiffusionTag>();
   const auto form         = integral(diffusion * inner(grad(v), grad(u)), dx);
   const auto coefficients = bind_coefficient<DiffusionTag>(2.5);
