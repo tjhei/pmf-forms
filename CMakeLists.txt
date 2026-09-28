@@ -51,14 +51,9 @@ add_executable(laplace laplace/laplace.cc)
 target_include_directories(laplace PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-add_executable(stokes stokes/stokes.cc)
-target_include_directories(stokes PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
 
 deal_ii_setup_target(elasticity)
 deal_ii_setup_target(laplace)
-deal_ii_setup_target(stokes)
 
 file(GLOB_RECURSE PROJECT_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
@@ -73,7 +68,7 @@ add_custom_target(indent
 )
 
 if(BUILD_TESTING)
-  add_executable(pmf_form_tests tests/test_main.cc)
+  add_executable(pmf_form_tests tests/test_main.cc tests/test_stokes.cc)
   deal_ii_setup_target(pmf_form_tests)
   target_link_libraries(pmf_form_tests Catch2::Catch2)
   target_include_directories(pmf_form_tests PRIVATE
@@ -83,5 +78,9 @@ if(BUILD_TESTING)
   add_test(
     NAME pmf_form_tests
     COMMAND mpiexec -n 1 $<TARGET_FILE:pmf_form_tests>
+  )
+  add_test(
+    NAME pmf_form_stokes_mpi
+    COMMAND mpiexec -n 2 $<TARGET_FILE:pmf_form_tests> "[stokes]"
   )
 endif()

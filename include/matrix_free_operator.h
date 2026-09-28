@@ -56,6 +56,7 @@ namespace pmf
                          const dealii::EvaluationFlags::EvaluationFlags flags,
                          const unsigned int field = 0)
         {
+          data.initialize_dof_vector(diagonal, field);
           using Evaluation =
             dealii::FEEvaluation<dim, degree, degree + 1, components, Number>;
           const std::function<void(Evaluation &)> operation =

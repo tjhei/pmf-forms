@@ -21,6 +21,8 @@ Implemented and build-checked:
   elasticity pattern.
 - CPU `dealii::MatrixFree` and `dealii::Portable::MatrixFree` execution for
   the supported forms, using the same form description.
+- Cached `get_diagonal()` for scalar, elasticity, and Stokes operators on both
+  backends, checked against basis-vector applications with constrained rows.
 - A runnable MPI elasticity example that applies both backends to the same
   distributed vector and checks their relative error.
 - A matching scalar Laplace example that binds a non-unit diffusion
@@ -28,8 +30,8 @@ Implemented and build-checked:
 - Compile-time trial/test field lists, coefficient occurrence types, and value/gradient
   requirements derived from the expression tree.
 - A two-field Stokes operator using separate velocity and pressure DoFHandlers
-  and block vectors on CPU and Portable MatrixFree, with an MPI comparison
-  example.
+  and block vectors on CPU and Portable MatrixFree, with MPI unit tests for
+  backend agreement and an interpolated manufactured solution.
 - Catch2 unit and backend comparison cases.
 
 Still incomplete:

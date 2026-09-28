@@ -136,10 +136,16 @@ auto stokes =
 The current Stokes lowering uses separate velocity and pressure DoFHandlers
 and block vectors. CPU and Portable operators use the same form. `FormFields`
 and `FieldRequirements` expose expression-derived compile-time metadata for
-field lists and value/gradient requirements. Run the MPI comparison with:
+field lists and value/gradient requirements. The former Stokes executable is
+now a unit test in `tests/test_stokes.cc`. A second test interpolates the
+manufactured solution derived from the stream function
+`x²(1-x)² y²(1-y)²`, with pressure `x + 2y - 1.5`, using
+`VectorTools::interpolate()`. Both backends are checked against independently
+integrated analytical forcing using `FEValues`. Run the Stokes tests on two
+MPI ranks with:
 
 ```sh
-mpiexec -n 2 ./build/stokes
+mpiexec -n 2 ./build/pmf_form_tests "[stokes]"
 ```
 
 ## Current scope

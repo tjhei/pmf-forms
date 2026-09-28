@@ -361,6 +361,7 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   cpu_source = 0.0;
   for (unsigned int i = 0; i < cpu_source.locally_owned_size(); ++i)
     cpu_source.local_element(i) = static_cast<double>(i % 9 + 1);
+  constraints.set_zero(cpu_source);
   cpu_source.update_ghost_values();
   cpu_operator.vmult(cpu_destination, cpu_source);
 
@@ -388,6 +389,7 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   host_source = 0.0;
   for (unsigned int i = 0; i < host_source.locally_owned_size(); ++i)
     host_source.local_element(i) = static_cast<double>(i % 9 + 1);
+  constraints.set_zero(host_source);
   host_source.compress(dealii::VectorOperation::insert);
   portable_source.import_elements(host_source, dealii::VectorOperation::insert);
   portable_operator.vmult(portable_destination, portable_source);
@@ -445,6 +447,7 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   cpu_src = 0.0;
   for (unsigned int i = 0; i < cpu_src.locally_owned_size(); ++i)
     cpu_src.local_element(i) = static_cast<double>(i + 1);
+  constraints.set_zero(cpu_src);
   cpu_src.update_ghost_values();
   cpu_op.vmult(cpu_dst, cpu_src);
 
@@ -476,6 +479,7 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   host_src = 0.0;
   for (unsigned int i = 0; i < host_src.locally_owned_size(); ++i)
     host_src.local_element(i) = static_cast<double>(i + 1);
+  constraints.set_zero(host_src);
   host_src.compress(dealii::VectorOperation::insert);
   portable_src.import_elements(host_src, dealii::VectorOperation::insert);
   portable_op.vmult(portable_dst, portable_src);
