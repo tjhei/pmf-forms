@@ -35,15 +35,12 @@ main(int argc, char **argv)
   using namespace pmf::forms;
   using namespace pmf::forms::expression_templates;
 
-  struct ViscosityTag
-  {};
 
   const auto [u, p] = trial_functions<ValueShape::vector, ValueShape::scalar>();
   const auto [v, q] = test_functions<ValueShape::vector, ValueShape::scalar>();
-  const auto mu     = coefficient<ViscosityTag>();
+  const auto mu     = coefficient(1.7);
   const auto form = integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx) -
                     integral(div(v) * p, dx) - integral(q * div(u), dx);
-  const auto bindings = bind_coefficient<ViscosityTag>(1.7);
 
   static_assert(FormFields<decltype(form)>::n_trial_fields == 2,
                 "Stokes requires two trial fields");
@@ -90,7 +87,7 @@ main(int argc, char **argv)
     mapping, dof_handlers, constraints, quadrature, cpu_additional_data);
 
   const auto cpu_operator =
-    make_matrix_free_operator<dim, degree>(cpu_data, form, bindings);
+    make_matrix_free_operator<dim, degree>(cpu_data, form);
   typename decltype(cpu_operator)::Vector cpu_source;
   typename decltype(cpu_operator)::Vector cpu_result;
   cpu_operator.initialize_dof_vector(cpu_source);
@@ -115,9 +112,7 @@ main(int argc, char **argv)
     mapping, dof_handlers, constraints, quadrature, portable_additional_data);
 
   const auto portable_operator =
-    make_portable_matrix_free_operator<dim, degree>(portable_data,
-                                                    form,
-                                                    bindings);
+    make_portable_matrix_free_operator<dim, degree>(portable_data, form);
   typename decltype(portable_operator)::Vector portable_source;
   typename decltype(portable_operator)::Vector portable_result;
   portable_operator.initialize_dof_vector(portable_source);

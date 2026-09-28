@@ -14,8 +14,9 @@ Implemented and build-checked:
 - Tag-free default `trial()` / `test()` symbols for single-field forms, with
   positional numbering via `trial_functions<Shapes...>()` and
   `test_functions<Shapes...>()` for multi-field forms.
-- Scalar Laplace and Helmholtz forms, with independently tagged constant
-  diffusion and reaction coefficients or literal constants in the form.
+- Scalar Laplace and Helmholtz forms, with embedded constant
+  diffusion and reaction coefficients via `coefficient(value)`, or literal
+  constants in the form. No separate bindings are required.
 - Unit-weight symmetric-gradient elasticity and the current constant Lamé
   elasticity pattern.
 - CPU `dealii::MatrixFree` and `dealii::Portable::MatrixFree` execution for
@@ -24,7 +25,7 @@ Implemented and build-checked:
   distributed vector and checks their relative error.
 - A matching scalar Laplace example that binds a non-unit diffusion
   coefficient and checks both backends under MPI.
-- Compile-time trial/test field lists, coefficient tags, and value/gradient
+- Compile-time trial/test field lists, coefficient occurrence types, and value/gradient
   requirements derived from the expression tree.
 - A two-field Stokes operator using separate velocity and pressure DoFHandlers
   and block vectors on CPU and Portable MatrixFree, with an MPI comparison

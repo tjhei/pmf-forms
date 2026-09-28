@@ -34,14 +34,11 @@ main(int argc, char **argv)
   using namespace pmf::forms;
   using namespace pmf::forms::expression_templates;
 
-  struct DiffusionTag
-  {};
 
-  const auto u            = trial();
-  const auto v            = test();
-  const auto diffusion    = coefficient<DiffusionTag>();
-  const auto form         = integral(diffusion * inner(grad(v), grad(u)), dx);
-  const auto coefficients = bind_coefficient<DiffusionTag>(2.5);
+  const auto u         = trial();
+  const auto v         = test();
+  const auto diffusion = coefficient(2.5);
+  const auto form      = integral(diffusion * inner(grad(v), grad(u)), dx);
 
   dealii::parallel::distributed::Triangulation<dim> triangulation(
     MPI_COMM_WORLD);
@@ -69,7 +66,7 @@ main(int argc, char **argv)
     mapping, dof_handler, constraints, quadrature, cpu_additional_data);
 
   const auto cpu_operator =
-    make_matrix_free_operator<dim, degree>(cpu_data, form, coefficients);
+    make_matrix_free_operator<dim, degree>(cpu_data, form);
   typename decltype(cpu_operator)::Vector cpu_source;
   typename decltype(cpu_operator)::Vector cpu_result;
   cpu_operator.initialize_dof_vector(cpu_source);
@@ -89,9 +86,7 @@ main(int argc, char **argv)
     mapping, dof_handler, constraints, quadrature, portable_additional_data);
 
   const auto portable_operator =
-    make_portable_matrix_free_operator<dim, degree>(portable_data,
-                                                    form,
-                                                    coefficients);
+    make_portable_matrix_free_operator<dim, degree>(portable_data, form);
   typename decltype(portable_operator)::Vector portable_source;
   typename decltype(portable_operator)::Vector portable_result;
   portable_operator.initialize_dof_vector(portable_source);

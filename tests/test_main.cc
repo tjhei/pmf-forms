@@ -84,14 +84,11 @@ TEST_CASE("Field tuples assign stable positional identities", "[forms]")
 TEST_CASE("Stokes form is represented by expression-template types",
           "[forms][stokes]")
 {
-  struct ViscosityTag
-  {};
-
   using namespace expression_templates;
 
   const auto [u, p] = trial_functions<ValueShape::vector, ValueShape::scalar>();
   const auto [v, q] = test_functions<ValueShape::vector, ValueShape::scalar>();
-  const auto mu     = coefficient<ViscosityTag>();
+  const auto mu     = coefficient(1.7);
 
   const auto stokes =
     integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx) -
@@ -118,11 +115,7 @@ TEST_CASE("Stokes form is represented by expression-template types",
                               typename ReorderedFields::trial_fields>::value);
   STATIC_REQUIRE(std::is_same<typename StokesFields::test_fields,
                               typename ReorderedFields::test_fields>::value);
-  const auto viscosity = bind_coefficient<ViscosityTag>(1.0);
-  StokesQuadratureKernel<2,
-                         ReorderedForm,
-                         typename std::decay<decltype(viscosity)>::type>
-    reordered_kernel(reordered, viscosity);
+  StokesQuadratureKernel<2, ReorderedForm> reordered_kernel(reordered);
   static_assert(internal::FieldRequirements<StokesForm, decltype(u)>::gradient,
                 "velocity trial must require gradients");
   static_assert(internal::FieldRequirements<StokesForm, decltype(p)>::value,
@@ -140,17 +133,12 @@ TEST_CASE("Stokes form is represented by expression-template types",
 TEST_CASE("Expression-template forms retain their structure in types",
           "[forms][expression-templates]")
 {
-  struct LambdaTag
-  {};
-  struct MuTag
-  {};
-
   using namespace expression_templates;
 
   const auto u      = trial<ValueShape::vector>();
   const auto v      = test<ValueShape::vector>();
-  const auto lambda = coefficient<LambdaTag>();
-  const auto mu     = coefficient<MuTag>();
+  const auto lambda = coefficient(3.0);
+  const auto mu     = coefficient(2.0);
 
   const auto elasticity =
     integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))), dx) +
@@ -162,7 +150,6 @@ TEST_CASE("Expression-template forms retain their structure in types",
                 ValueShape::scalar);
   STATIC_REQUIRE(sizeof(elasticity) > 0);
 
-  const auto coefficients = elasticity_coefficients<LambdaTag, MuTag>(3.0, 2.0);
   dealii::Tensor<2, 2, double> gradient;
   gradient[0][0] = 1.0;
   gradient[0][1] = 2.0;
@@ -170,32 +157,32 @@ TEST_CASE("Expression-template forms retain their structure in types",
   gradient[1][1] = 5.0;
   dealii::Tensor<2, 2, double> stress;
   stress = 0.0;
-  expression_templates::internal::apply_form(elasticity,
-                                             gradient,
-                                             stress,
-                                             coefficients);
+  expression_templates::internal::apply_form(elasticity, gradient, stress);
 
   REQUIRE(stress[0][0] == Catch::Approx(22.0));
   REQUIRE(stress[0][1] == Catch::Approx(12.0));
   REQUIRE(stress[1][0] == Catch::Approx(12.0));
   REQUIRE(stress[1][1] == Catch::Approx(38.0));
+
+  const auto combined = integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))) +
+                                   lambda * div(v) * div(u),
+                                 dx);
+  STATIC_REQUIRE(FormFields<decltype(combined)>::n_coefficients == 2);
+  dealii::Tensor<2, 2, double> combined_stress;
+  internal::apply_form(combined, gradient, combined_stress);
+  REQUIRE((combined_stress - stress).norm() == Catch::Approx(0.0));
 }
 
-TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
+TEST_CASE("Scalar forms read independent embedded coefficients",
           "[forms][laplace]")
 {
-  struct CoefficientTag
-  {};
-  struct ReactionTag
-  {};
   using namespace expression_templates;
 
   const auto u             = trial<ValueShape::scalar>();
   const auto v             = test<ValueShape::scalar>();
   const auto unit_form     = integral(inner(grad(v), grad(u)), dx);
-  const auto alpha         = coefficient<CoefficientTag>();
+  const auto alpha         = coefficient(3.0);
   const auto weighted_form = integral(alpha * inner(grad(v), grad(u)), dx);
-  const auto binding       = bind_coefficient<CoefficientTag>(3.0);
 
   dealii::Tensor<1, 2, double> gradient;
   gradient[0] = 2.0;
@@ -203,39 +190,43 @@ TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
   dealii::Tensor<1, 2, double> flux;
   flux = 0.0;
 
-  internal::apply_scalar_form(unit_form, gradient, flux, NoCoefficients{}, 1.0);
+  internal::apply_scalar_form(unit_form, gradient, flux, 1.0);
   REQUIRE(flux[0] == Catch::Approx(2.0));
   REQUIRE(flux[1] == Catch::Approx(-1.0));
 
   flux = 0.0;
-  internal::apply_scalar_form(weighted_form, gradient, flux, binding, 1.0);
+  internal::apply_scalar_form(weighted_form, gradient, flux, 1.0);
   REQUIRE(flux[0] == Catch::Approx(6.0));
   REQUIRE(flux[1] == Catch::Approx(-3.0));
 
-  const auto beta = coefficient<ReactionTag>();
+  const auto beta      = coefficient(4.0);
+  const auto diffusion = coefficient(2.5);
   const auto weighted_helmholtz =
-    integral(alpha * inner(grad(v), grad(u)) + beta * (v * u), dx);
-  const auto bindings = bind_coefficients(bind_coefficient<CoefficientTag>(2.5),
-                                          bind_coefficient<ReactionTag>(4.0));
-  flux                = 0.0;
+    integral(diffusion * inner(grad(v), grad(u)) + beta * (v * u), dx);
+  flux                   = 0.0;
   double submitted_value = 0.0;
   internal::apply_scalar_form(
-    weighted_helmholtz, 6.0, gradient, submitted_value, flux, bindings, 1.0);
+    weighted_helmholtz, 6.0, gradient, submitted_value, flux, 1.0);
   REQUIRE(flux[0] == Catch::Approx(5.0));
   REQUIRE(flux[1] == Catch::Approx(-2.5));
   REQUIRE(submitted_value == Catch::Approx(24.0));
+
+  STATIC_REQUIRE(FormFields<decltype(weighted_helmholtz)>::n_coefficients == 2);
+  STATIC_REQUIRE(std::is_same<decltype(beta), decltype(diffusion)>::value);
+  auto       owned_coefficient = coefficient(-2.0);
+  const auto copied_form       = integral(owned_coefficient * (v * u), dx);
+  owned_coefficient.value      = 9.0;
+  submitted_value              = 0.0;
+  internal::apply_scalar_form(
+    copied_form, 6.0, gradient, submitted_value, flux, 1.0);
+  REQUIRE(submitted_value == Catch::Approx(-12.0));
 
   const auto literal_helmholtz =
     integral(2.0 * inner(grad(v), grad(u)) + v * (3.0 * u), dx);
   flux            = 0.0;
   submitted_value = 0.0;
-  internal::apply_scalar_form(literal_helmholtz,
-                              6.0,
-                              gradient,
-                              submitted_value,
-                              flux,
-                              NoCoefficients{},
-                              1.0);
+  internal::apply_scalar_form(
+    literal_helmholtz, 6.0, gradient, submitted_value, flux, 1.0);
   REQUIRE(flux[0] == Catch::Approx(4.0));
   REQUIRE(flux[1] == Catch::Approx(-2.0));
   REQUIRE(submitted_value == Catch::Approx(18.0));
@@ -244,19 +235,18 @@ TEST_CASE("Scalar Laplace forms accept optional tagged coefficients",
 TEST_CASE("One expression-template form drives both MatrixFree backends",
           "[forms][matrix-free]")
 {
-  struct LambdaTag
-  {};
-  struct MuTag
-  {};
-
   using namespace expression_templates;
   constexpr int dim       = 2;
   constexpr int fe_degree = 1;
 
-  const auto u    = trial<ValueShape::vector>();
-  const auto v    = test<ValueShape::vector>();
-  const auto form = integral(inner(sym(grad(v)), sym(grad(u))), dx);
-  using Form      = std::decay_t<decltype(form)>;
+  const auto u      = trial<ValueShape::vector>();
+  const auto v      = test<ValueShape::vector>();
+  const auto lambda = coefficient(3.0);
+  const auto mu     = coefficient(2.0);
+  const auto form   = integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))) +
+                               lambda * div(v) * div(u),
+                             dx);
+  using Form        = std::decay_t<decltype(form)>;
   STATIC_REQUIRE(
     std::is_same<MatrixFreeOperator<dim, fe_degree, decltype(form)>,
                  MatrixFreeOperator<dim, fe_degree, Form>>::value);
@@ -339,22 +329,16 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
 TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
           "[forms][matrix-free][laplace]")
 {
-  struct AlphaTag
-  {};
-  struct BetaTag
-  {};
   using namespace expression_templates;
   constexpr int dim    = 2;
   constexpr int degree = 1;
 
   const auto u     = trial<ValueShape::scalar>();
   const auto v     = test<ValueShape::scalar>();
-  const auto alpha = coefficient<AlphaTag>();
-  const auto beta  = coefficient<BetaTag>();
+  const auto alpha = coefficient(2.5);
+  const auto beta  = coefficient(1.75);
   const auto form =
     integral(alpha * inner(grad(v), grad(u)) + beta * (v * u), dx);
-  const auto binding = bind_coefficients(bind_coefficient<AlphaTag>(2.5),
-                                         bind_coefficient<BetaTag>(1.75));
 
   dealii::parallel::distributed::Triangulation<dim> tria(MPI_COMM_WORLD);
   dealii::GridGenerator::hyper_cube(tria);
@@ -376,12 +360,10 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
     dealii::update_gradients | dealii::update_JxW_values;
   cpu_data->reinit(
     mapping, dof_handler, constraints, quadrature, cpu_additional_data);
-  auto cpu_op = make_matrix_free_operator<dim, degree>(cpu_data, form, binding);
+  auto cpu_op = make_matrix_free_operator<dim, degree>(cpu_data, form);
   STATIC_REQUIRE(
-    std::is_same<
-      decltype(cpu_op),
-      MatrixFreeOperator<dim, degree, decltype((form)), decltype((binding))>>::
-      value);
+    std::is_same<decltype(cpu_op),
+                 MatrixFreeOperator<dim, degree, decltype((form))>>::value);
   dealii::LinearAlgebra::distributed::Vector<double> cpu_src, cpu_dst;
   cpu_op.initialize_dof_vector(cpu_src);
   cpu_op.initialize_dof_vector(cpu_dst);
@@ -407,9 +389,7 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   portable_data->reinit(
     mapping, dof_handler, constraints, quadrature, portable_additional_data);
   auto portable_op =
-    make_portable_matrix_free_operator<dim, degree>(portable_data,
-                                                    form,
-                                                    binding);
+    make_portable_matrix_free_operator<dim, degree>(portable_data, form);
   typename decltype(portable_op)::Vector portable_src, portable_dst;
   portable_op.initialize_dof_vector(portable_src);
   portable_op.initialize_dof_vector(portable_dst);

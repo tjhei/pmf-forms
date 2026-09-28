@@ -40,11 +40,16 @@ namespace pmf
         static constexpr ValueShape   shape = Shape;
       };
 
-      /** @brief A scalar coefficient identified by a user-provided tag type. */
-      template <typename Tag>
+      /**
+       * @brief A scalar coefficient owning its constant value.
+       * @tparam Number The arithmetic type of the stored value.
+       */
+      template <typename Number>
       struct Coefficient
       {
         static constexpr ValueShape shape = ValueShape::scalar;
+        /** @brief The value copied into each occurrence in a form. */
+        Number value;
       };
 
       /** @brief A scalar constant expression. */
@@ -152,8 +157,8 @@ namespace pmf
       template <unsigned int Index, ValueShape Shape>
       struct IsExpression<Test<Index, Shape>> : std::true_type
       {};
-      template <typename Tag>
-      struct IsExpression<Coefficient<Tag>> : std::true_type
+      template <typename Number>
+      struct IsExpression<Coefficient<Number>> : std::true_type
       {};
       template <typename Number>
       struct IsExpression<Constant<Number>> : std::true_type
@@ -265,6 +270,15 @@ namespace pmf
             typename TypeListMergeUnique<appended, TypeList<Rest...>>::type;
         };
 
+        template <typename Left, typename Right>
+        struct TypeListConcat;
+
+        template <typename... Left, typename... Right>
+        struct TypeListConcat<TypeList<Left...>, TypeList<Right...>>
+        {
+          using type = TypeList<Left..., Right...>;
+        };
+
         template <typename Field, typename List>
         struct InsertField;
 
@@ -306,33 +320,33 @@ namespace pmf
         template <typename Expression>
         struct FieldAnalysis
         {
-          using trial_fields     = TypeList<>;
-          using test_fields      = TypeList<>;
-          using coefficient_tags = TypeList<>;
+          using trial_fields      = TypeList<>;
+          using test_fields       = TypeList<>;
+          using coefficient_types = TypeList<>;
         };
 
         template <unsigned int Index, ValueShape Shape>
         struct FieldAnalysis<Trial<Index, Shape>>
         {
-          using trial_fields     = TypeList<Trial<Index, Shape>>;
-          using test_fields      = TypeList<>;
-          using coefficient_tags = TypeList<>;
+          using trial_fields      = TypeList<Trial<Index, Shape>>;
+          using test_fields       = TypeList<>;
+          using coefficient_types = TypeList<>;
         };
 
         template <unsigned int Index, ValueShape Shape>
         struct FieldAnalysis<Test<Index, Shape>>
         {
-          using trial_fields     = TypeList<>;
-          using test_fields      = TypeList<Test<Index, Shape>>;
-          using coefficient_tags = TypeList<>;
+          using trial_fields      = TypeList<>;
+          using test_fields       = TypeList<Test<Index, Shape>>;
+          using coefficient_types = TypeList<>;
         };
 
-        template <typename Tag>
-        struct FieldAnalysis<Coefficient<Tag>>
+        template <typename Number>
+        struct FieldAnalysis<Coefficient<Number>>
         {
-          using trial_fields     = TypeList<>;
-          using test_fields      = TypeList<>;
-          using coefficient_tags = TypeList<Coefficient<Tag>>;
+          using trial_fields      = TypeList<>;
+          using test_fields       = TypeList<>;
+          using coefficient_types = TypeList<Coefficient<Number>>;
         };
 
         template <typename Expression>
@@ -348,19 +362,19 @@ namespace pmf
         struct FieldAnalysis<Integral<Expression>> : FieldAnalysis<Expression>
         {};
 
-#define PMF_FORM_ANALYZE_BINARY(Node)                         \
-  template <typename Left, typename Right>                    \
-  struct FieldAnalysis<Node<Left, Right>>                     \
-  {                                                           \
-    using trial_fields = typename TypeListMergeUnique<        \
-      typename FieldAnalysis<Left>::trial_fields,             \
-      typename FieldAnalysis<Right>::trial_fields>::type;     \
-    using test_fields = typename TypeListMergeUnique<         \
-      typename FieldAnalysis<Left>::test_fields,              \
-      typename FieldAnalysis<Right>::test_fields>::type;      \
-    using coefficient_tags = typename TypeListMergeUnique<    \
-      typename FieldAnalysis<Left>::coefficient_tags,         \
-      typename FieldAnalysis<Right>::coefficient_tags>::type; \
+#define PMF_FORM_ANALYZE_BINARY(Node)                          \
+  template <typename Left, typename Right>                     \
+  struct FieldAnalysis<Node<Left, Right>>                      \
+  {                                                            \
+    using trial_fields = typename TypeListMergeUnique<         \
+      typename FieldAnalysis<Left>::trial_fields,              \
+      typename FieldAnalysis<Right>::trial_fields>::type;      \
+    using test_fields = typename TypeListMergeUnique<          \
+      typename FieldAnalysis<Left>::test_fields,               \
+      typename FieldAnalysis<Right>::test_fields>::type;       \
+    using coefficient_types = typename TypeListConcat<         \
+      typename FieldAnalysis<Left>::coefficient_types,         \
+      typename FieldAnalysis<Right>::coefficient_types>::type; \
   }
 
         PMF_FORM_ANALYZE_BINARY(Add);
@@ -469,10 +483,11 @@ namespace pmf
         static constexpr unsigned int n_test_fields =
           internal::TypeListSize<typename internal::FieldAnalysis<
             std::decay_t<Form>>::test_fields>::value;
-        using coefficient_tags = typename internal::FieldAnalysis<
-          std::decay_t<Form>>::coefficient_tags;
+        using coefficient_types = typename internal::FieldAnalysis<
+          std::decay_t<Form>>::coefficient_types;
+        /** @brief Number of coefficient occurrences, including repeated uses. */
         static constexpr unsigned int n_coefficients =
-          internal::TypeListSize<coefficient_tags>::value;
+          internal::TypeListSize<coefficient_types>::value;
       };
 
       namespace internal
@@ -546,12 +561,20 @@ namespace pmf
         return {};
       }
 
-      /** @brief Create a typed scalar coefficient field. */
-      template <typename Tag>
-      constexpr Coefficient<Tag>
-      coefficient()
+      /**
+       * @brief Create a scalar coefficient owning a copy of a constant value.
+       * @tparam Number An arithmetic value type.
+       * @param value The constant coefficient value.
+       * @return A coefficient expression that owns the supplied value.
+       * Spatially varying provider objects are not supported yet.
+       */
+      template <typename Number,
+                typename std::enable_if<std::is_arithmetic<Number>::value,
+                                        int>::type = 0>
+      constexpr Coefficient<Number>
+      coefficient(Number value)
       {
-        return {};
+        return {value};
       }
 
       /** @brief Create a scalar constant expression. */

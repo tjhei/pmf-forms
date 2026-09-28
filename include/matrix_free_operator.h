@@ -27,147 +27,63 @@ namespace pmf
   {
     namespace expression_templates
     {
-      /**
-       * @brief Bind constant Lamé parameters for isotropic elasticity.
-       * @tparam LambdaTag The tag type used by the form's lambda coefficient.
-       * @tparam MuTag The tag type used by the form's mu coefficient.
-       */
-      /**
-       * @brief Create constant coefficient bindings for an elasticity form.
-       * @param lambda The first Lamé parameter.
-       * @param mu The shear modulus.
-       */
-      template <typename LambdaTag, typename MuTag, typename Number = double>
-      struct ElasticityCoefficients
-      {
-        using value_type = Number;
-        using lambda_tag = LambdaTag;
-        using mu_tag     = MuTag;
-
-        Number lambda;
-        Number mu;
-      };
-
-      /** @brief A value bound to one coefficient symbol in a form. */
-      template <typename Tag, typename Number = double>
-      struct CoefficientBinding
-      {
-        using value_type = Number;
-        using tag_type   = Tag;
-        Number value;
-      };
-
-      /** @brief Bind a numeric value to a tagged coefficient symbol. */
-      template <typename Tag, typename Number>
-      constexpr CoefficientBinding<Tag, Number>
-      bind_coefficient(Number value)
-      {
-        return {value};
-      }
-
-      /** @brief Empty coefficient bindings for coefficient-free forms. */
-      struct NoCoefficients
-      {
-        using value_type = double;
-      };
-
-      /** @brief A compile-time collection of independently tagged constants. */
-      template <typename... Bindings>
-      struct CoefficientBindings;
-
-      template <typename Binding>
-      struct CoefficientBindings<Binding>
-      {
-        using value_type = typename Binding::value_type;
-        Binding binding;
-      };
-
-      template <typename First, typename Second, typename... Rest>
-      struct CoefficientBindings<First, Second, Rest...>
-      {
-        using value_type = typename First::value_type;
-        First                                first;
-        CoefficientBindings<Second, Rest...> rest;
-      };
-
-      /** @brief Collect separate tagged constants for one form. */
-      template <typename First>
-      constexpr auto
-      bind_coefficients(First first)
-      {
-        return CoefficientBindings<First>{first};
-      }
-
-      template <typename First, typename Second, typename... Rest>
-      constexpr auto
-      bind_coefficients(First first, Second second, Rest... rest)
-      {
-        return CoefficientBindings<First, Second, Rest...>{
-          first, bind_coefficients(second, rest...)};
-      }
-
-      namespace internal
-      {
-        template <typename Tag,
-                  typename BindingTag,
-                  typename Number,
-                  typename std::enable_if<std::is_same<Tag, BindingTag>::value,
-                                          int>::type = 0>
-        DEAL_II_HOST_DEVICE Number
-        coefficient_value(const CoefficientBinding<BindingTag, Number> &binding)
-        {
-          return binding.value;
-        }
-
-        template <typename Tag, typename Binding>
-        DEAL_II_HOST_DEVICE auto
-        coefficient_value(const CoefficientBindings<Binding> &bindings)
-          -> decltype(coefficient_value<Tag>(bindings.binding))
-        {
-          return coefficient_value<Tag>(bindings.binding);
-        }
-
-        template <typename Tag,
-                  typename First,
-                  typename Second,
-                  typename... Rest>
-        DEAL_II_HOST_DEVICE auto
-        coefficient_value(
-          const CoefficientBindings<First, Second, Rest...> &bindings) ->
-          typename std::enable_if<
-            std::is_same<Tag, typename First::tag_type>::value,
-            typename First::value_type>::type
-        {
-          return bindings.first.value;
-        }
-
-        template <typename Tag,
-                  typename First,
-                  typename Second,
-                  typename... Rest>
-        DEAL_II_HOST_DEVICE auto
-        coefficient_value(
-          const CoefficientBindings<First, Second, Rest...> &bindings) ->
-          typename std::enable_if<
-            !std::is_same<Tag, typename First::tag_type>::value,
-            decltype(coefficient_value<Tag>(bindings.rest))>::type
-        {
-          return coefficient_value<Tag>(bindings.rest);
-        }
-      } // namespace internal
-
-      template <typename LambdaTag, typename MuTag, typename Number = double>
-      constexpr ElasticityCoefficients<LambdaTag, MuTag, Number>
-      elasticity_coefficients(Number lambda, Number mu)
-      {
-        return {lambda, mu};
-      }
-
-
       namespace internal
       {
         using dealii::Tensor;
         using dealii::trace;
+
+        template <typename Expression>
+        struct CoefficientValue;
+
+        template <typename Number>
+        struct CoefficientValue<Coefficient<Number>>
+        {
+          DEAL_II_HOST_DEVICE static Number
+          get(const Coefficient<Number> &expression)
+          {
+            return expression.value;
+          }
+        };
+
+        template <typename Expression>
+        struct CoefficientValue<Integral<Expression>>
+        {
+          DEAL_II_HOST_DEVICE static auto
+          get(const Integral<Expression> &form)
+          {
+            return CoefficientValue<Expression>::get(form.expression);
+          }
+        };
+
+#define PMF_FORM_COEFFICIENT_VALUE_BINARY(Node)                \
+  template <typename Left, typename Right>                     \
+  struct CoefficientValue<Node<Left, Right>>                   \
+  {                                                            \
+    DEAL_II_HOST_DEVICE static auto                            \
+    get(const Node<Left, Right> &expression)                   \
+    {                                                          \
+      if constexpr (FormFields<Left>::n_coefficients > 0)      \
+        return CoefficientValue<Left>::get(expression.left);   \
+      else                                                     \
+        return CoefficientValue<Right>::get(expression.right); \
+    }                                                          \
+  }
+
+        PMF_FORM_COEFFICIENT_VALUE_BINARY(Add);
+        PMF_FORM_COEFFICIENT_VALUE_BINARY(Subtract);
+        PMF_FORM_COEFFICIENT_VALUE_BINARY(Multiply);
+        PMF_FORM_COEFFICIENT_VALUE_BINARY(FormSum);
+        PMF_FORM_COEFFICIENT_VALUE_BINARY(FormDifference);
+#undef PMF_FORM_COEFFICIENT_VALUE_BINARY
+
+        template <typename Form>
+        DEAL_II_HOST_DEVICE auto
+        single_coefficient_value(const Form &form)
+        {
+          static_assert(FormFields<Form>::n_coefficients == 1,
+                        "expected exactly one coefficient occurrence");
+          return CoefficientValue<Form>::get(form);
+        }
 
         template <typename TensorType>
         struct TensorDimension;
@@ -179,7 +95,6 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
@@ -189,8 +104,7 @@ namespace pmf
             &,
           const Tensor<1, dim, Number> &gradient,
           Tensor<1, dim, Number>       &flux,
-          const Coefficients &,
-          const Number sign)
+          const Number                  sign)
         {
           flux += sign * gradient;
         }
@@ -199,79 +113,60 @@ namespace pmf
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename CoefficientTag,
-                  typename BindingNumber>
+                  typename CoefficientNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_term(
           const Integral<
-            Multiply<Coefficient<CoefficientTag>,
+            Multiply<Coefficient<CoefficientNumber>,
                      Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
-                           Gradient<Trial<TrialIndex, ValueShape::scalar>>>>> &,
-          const Tensor<1, dim, Number>                            &gradient,
-          Tensor<1, dim, Number>                                  &flux,
-          const CoefficientBinding<CoefficientTag, BindingNumber> &coefficient,
-          const Number                                             sign)
+                           Gradient<Trial<TrialIndex, ValueShape::scalar>>>>>
+                                       &form,
+          const Tensor<1, dim, Number> &gradient,
+          Tensor<1, dim, Number>       &flux,
+          const Number                  sign)
         {
-          flux += (sign * Number(coefficient.value)) * gradient;
+          flux += (sign * Number(form.expression.left.value)) * gradient;
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_scalar_form(const FormSum<Left, Right>   &form,
                           const Tensor<1, dim, Number> &gradient,
                           Tensor<1, dim, Number>       &flux,
-                          const Coefficients           &coefficients,
                           const Number                  sign)
         {
-          apply_scalar_form(form.left, gradient, flux, coefficients, sign);
-          apply_scalar_form(form.right, gradient, flux, coefficients, sign);
+          apply_scalar_form(form.left, gradient, flux, sign);
+          apply_scalar_form(form.right, gradient, flux, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_scalar_form(const Integral<Expression>   &form,
                           const Tensor<1, dim, Number> &gradient,
                           Tensor<1, dim, Number>       &flux,
-                          const Coefficients           &coefficients,
                           const Number                  sign)
         {
-          apply_scalar_term(form, gradient, flux, coefficients, sign);
+          apply_scalar_term(form, gradient, flux, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_scalar_form(const FormDifference<Left, Right> &form,
                           const Tensor<1, dim, Number>      &gradient,
                           Tensor<1, dim, Number>            &flux,
-                          const Coefficients                &coefficients,
                           const Number                       sign)
         {
-          apply_scalar_form(form.left, gradient, flux, coefficients, sign);
-          apply_scalar_form(form.right, gradient, flux, coefficients, -sign);
+          apply_scalar_form(form.left, gradient, flux, sign);
+          apply_scalar_form(form.right, gradient, flux, -sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(const Expression &,
                                 const Number,
                                 const Tensor<1, dim, Number> &,
                                 Number &,
                                 Tensor<1, dim, Number> &,
-                                const Coefficients &,
                                 const Number)
         {
           static_assert(sizeof(Expression) == 0,
@@ -280,7 +175,6 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
@@ -291,15 +185,13 @@ namespace pmf
           const Tensor<1, dim, Number> &gradient,
           Number &,
           Tensor<1, dim, Number> &flux,
-          const Coefficients &,
-          const Number sign)
+          const Number            sign)
         {
           flux += sign * gradient;
         }
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
                   typename ConstantNumber>
@@ -313,8 +205,7 @@ namespace pmf
           const Tensor<1, dim, Number> &gradient,
           Number &,
           Tensor<1, dim, Number> &flux,
-          const Coefficients &,
-          const Number sign)
+          const Number            sign)
         {
           flux += (sign * Number(expression.left.value)) * gradient;
         }
@@ -323,29 +214,24 @@ namespace pmf
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename CoefficientTag,
-                  typename Coefficients>
+                  typename CoefficientNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
-          const Multiply<Coefficient<CoefficientTag>,
+          const Multiply<Coefficient<CoefficientNumber>,
                          Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
                                Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
-            &,
+            &expression,
           const Number,
           const Tensor<1, dim, Number> &gradient,
           Number &,
           Tensor<1, dim, Number> &flux,
-          const Coefficients     &coefficients,
           const Number            sign)
         {
-          flux +=
-            (sign * Number(coefficient_value<CoefficientTag>(coefficients))) *
-            gradient;
+          flux += (sign * Number(expression.left.value)) * gradient;
         }
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
@@ -356,7 +242,6 @@ namespace pmf
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const Coefficients &,
           const Number sign)
         {
           submitted_value += sign * value;
@@ -366,8 +251,7 @@ namespace pmf
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename ConstantNumber,
-                  typename Coefficients>
+                  typename ConstantNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Constant<ConstantNumber>,
@@ -378,7 +262,6 @@ namespace pmf
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const Coefficients &,
           const Number sign)
         {
           submitted_value += (sign * Number(constant.left.value)) * value;
@@ -388,8 +271,7 @@ namespace pmf
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename ConstantNumber,
-                  typename Coefficients>
+                  typename ConstantNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Test<TestIndex, ValueShape::scalar>,
@@ -400,7 +282,6 @@ namespace pmf
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const Coefficients &,
           const Number sign)
         {
           submitted_value +=
@@ -411,8 +292,7 @@ namespace pmf
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename ConstantNumber,
-                  typename Coefficients>
+                  typename ConstantNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
           const Multiply<Multiply<Constant<ConstantNumber>,
@@ -422,7 +302,6 @@ namespace pmf
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const Coefficients &,
           const Number sign)
         {
           submitted_value +=
@@ -433,197 +312,120 @@ namespace pmf
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename CoefficientTag,
-                  typename Coefficients>
+                  typename CoefficientNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
-          const Multiply<Coefficient<CoefficientTag>,
+          const Multiply<Coefficient<CoefficientNumber>,
                          Multiply<Test<TestIndex, ValueShape::scalar>,
-                                  Trial<TrialIndex, ValueShape::scalar>>> &,
+                                  Trial<TrialIndex, ValueShape::scalar>>>
+                      &expression,
           const Number value,
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const Coefficients &coefficients,
-          const Number        sign)
+          const Number sign)
         {
-          submitted_value +=
-            sign * Number(coefficient_value<CoefficientTag>(coefficients)) *
-            value;
+          submitted_value += sign * Number(expression.left.value) * value;
         }
 
         template <int dim,
                   typename Number,
                   unsigned int TestIndex,
                   unsigned int TrialIndex,
-                  typename CoefficientTag,
-                  typename Coefficients>
+                  typename CoefficientNumber>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(
-          const Multiply<Multiply<Coefficient<CoefficientTag>,
+          const Multiply<Multiply<Coefficient<CoefficientNumber>,
                                   Test<TestIndex, ValueShape::scalar>>,
-                         Trial<TrialIndex, ValueShape::scalar>> &,
-          const Number value,
+                         Trial<TrialIndex, ValueShape::scalar>> &expression,
+          const Number                                           value,
           const Tensor<1, dim, Number> &,
           Number &submitted_value,
           Tensor<1, dim, Number> &,
-          const Coefficients &coefficients,
-          const Number        sign)
+          const Number sign)
         {
-          submitted_value +=
-            sign * Number(coefficient_value<CoefficientTag>(coefficients)) *
-            value;
+          submitted_value += sign * Number(expression.left.left.value) * value;
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(const Add<Left, Right>       &expression,
                                 const Number                  value,
                                 const Tensor<1, dim, Number> &gradient,
                                 Number                       &submitted_value,
                                 Tensor<1, dim, Number>       &flux,
-                                const Coefficients           &coefficients,
                                 const Number                  sign)
         {
-          apply_scalar_expression(expression.left,
-                                  value,
-                                  gradient,
-                                  submitted_value,
-                                  flux,
-                                  coefficients,
-                                  sign);
-          apply_scalar_expression(expression.right,
-                                  value,
-                                  gradient,
-                                  submitted_value,
-                                  flux,
-                                  coefficients,
-                                  sign);
+          apply_scalar_expression(
+            expression.left, value, gradient, submitted_value, flux, sign);
+          apply_scalar_expression(
+            expression.right, value, gradient, submitted_value, flux, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_scalar_expression(const Subtract<Left, Right>  &expression,
                                 const Number                  value,
                                 const Tensor<1, dim, Number> &gradient,
                                 Number                       &submitted_value,
                                 Tensor<1, dim, Number>       &flux,
-                                const Coefficients           &coefficients,
                                 const Number                  sign)
         {
-          apply_scalar_expression(expression.left,
-                                  value,
-                                  gradient,
-                                  submitted_value,
-                                  flux,
-                                  coefficients,
-                                  sign);
-          apply_scalar_expression(expression.right,
-                                  value,
-                                  gradient,
-                                  submitted_value,
-                                  flux,
-                                  coefficients,
-                                  -sign);
+          apply_scalar_expression(
+            expression.left, value, gradient, submitted_value, flux, sign);
+          apply_scalar_expression(
+            expression.right, value, gradient, submitted_value, flux, -sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_scalar_form(const Integral<Expression>   &form,
                           const Number                  value,
                           const Tensor<1, dim, Number> &gradient,
                           Number                       &submitted_value,
                           Tensor<1, dim, Number>       &flux,
-                          const Coefficients           &coefficients,
                           const Number                  sign)
         {
-          apply_scalar_expression(form.expression,
-                                  value,
-                                  gradient,
-                                  submitted_value,
-                                  flux,
-                                  coefficients,
-                                  sign);
+          apply_scalar_expression(
+            form.expression, value, gradient, submitted_value, flux, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_scalar_form(const FormSum<Left, Right>   &form,
                           const Number                  value,
                           const Tensor<1, dim, Number> &gradient,
                           Number                       &submitted_value,
                           Tensor<1, dim, Number>       &flux,
-                          const Coefficients           &coefficients,
                           const Number                  sign)
         {
-          apply_scalar_form(form.left,
-                            value,
-                            gradient,
-                            submitted_value,
-                            flux,
-                            coefficients,
-                            sign);
-          apply_scalar_form(form.right,
-                            value,
-                            gradient,
-                            submitted_value,
-                            flux,
-                            coefficients,
-                            sign);
+          apply_scalar_form(
+            form.left, value, gradient, submitted_value, flux, sign);
+          apply_scalar_form(
+            form.right, value, gradient, submitted_value, flux, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_scalar_form(const FormDifference<Left, Right> &form,
                           const Number                       value,
                           const Tensor<1, dim, Number>      &gradient,
                           Number                            &submitted_value,
                           Tensor<1, dim, Number>            &flux,
-                          const Coefficients                &coefficients,
                           const Number                       sign)
         {
-          apply_scalar_form(form.left,
-                            value,
-                            gradient,
-                            submitted_value,
-                            flux,
-                            coefficients,
-                            sign);
-          apply_scalar_form(form.right,
-                            value,
-                            gradient,
-                            submitted_value,
-                            flux,
-                            coefficients,
-                            -sign);
+          apply_scalar_form(
+            form.left, value, gradient, submitted_value, flux, sign);
+          apply_scalar_form(
+            form.right, value, gradient, submitted_value, flux, -sign);
         }
 
-        template <int dim, typename Form, typename Coefficients>
+        template <int dim, typename Form>
         class ScalarLaplaceQuadratureKernel
         {
         public:
-          ScalarLaplaceQuadratureKernel(Form form, Coefficients coefficients)
+          ScalarLaplaceQuadratureKernel(Form form)
             : form(std::move(form))
-            , coefficients(std::move(coefficients))
           {}
 
           template <typename FEEvaluationType>
@@ -636,20 +438,14 @@ namespace pmf
             dealii::Tensor<1, dim, Number> flux;
             flux                   = Number();
             Number submitted_value = Number();
-            apply_scalar_form(form,
-                              Number(value),
-                              gradient,
-                              submitted_value,
-                              flux,
-                              coefficients,
-                              Number(1));
+            apply_scalar_form(
+              form, Number(value), gradient, submitted_value, flux, Number(1));
             phi.submit_value(submitted_value, q);
             phi.submit_gradient(flux, q);
           }
 
         private:
-          Form         form;
-          Coefficients coefficients;
+          Form form;
         };
 
         template <int dim, typename Number>
@@ -676,7 +472,6 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
@@ -687,8 +482,7 @@ namespace pmf
             &,
           const Tensor<2, dim, Number> &gradient,
           Tensor<2, dim, Number>       &stress,
-          const Coefficients &,
-          const double sign)
+          const double                  sign)
         {
           add_symmetric_gradient_term(stress,
                                       gradient,
@@ -696,134 +490,103 @@ namespace pmf
                                       Number(sign));
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_term(const Integral<Expression> &,
-                   const Tensor<2, dim, Number> &,
-                   Tensor<2, dim, Number> &,
-                   const Coefficients &)
-        {
-          static_assert(sizeof(Expression) == 0,
-                        "This MatrixFree backend currently supports the "
-                        "isotropic elasticity expression patterns only");
-        }
-
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_form(const Integral<Expression> &,
                    const Tensor<2, dim, Number> &,
                    Tensor<2, dim, Number> &,
-                   const Coefficients &,
-                   double);
+                   double = 1.0);
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_term(const Integral<Expression> &,
                    const Tensor<2, dim, Number> &,
                    Tensor<2, dim, Number> &,
-                   const Coefficients &,
                    double);
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   typename ConstantNumber,
-                  typename MuTag,
+                  typename MuNumber,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<Multiply<
-            Multiply<Constant<ConstantNumber>, Coefficient<MuTag>>,
+            Multiply<Constant<ConstantNumber>, Coefficient<MuNumber>>,
             Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
                   Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>>
             &,
           const Tensor<2, dim, Number> &,
           Tensor<2, dim, Number> &,
-          const Coefficients &,
           double);
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
-                  typename LambdaTag,
+                  typename LambdaNumber,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<
-            Multiply<Multiply<Coefficient<LambdaTag>,
+            Multiply<Multiply<Coefficient<LambdaNumber>,
                               Divergence<Test<TestIndex, ValueShape::vector>>>,
-                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &,
+                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &form,
           const Tensor<2, dim, Number> &,
           Tensor<2, dim, Number> &,
-          const Coefficients &,
           double);
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
+        DEAL_II_HOST_DEVICE void
+        apply_form(const Integral<Add<Left, Right>> &form,
+                   const Tensor<2, dim, Number>     &gradient,
+                   Tensor<2, dim, Number>           &stress,
+                   double                            sign = 1.0);
+
+        template <int dim, typename Number, typename Left, typename Right>
+        DEAL_II_HOST_DEVICE void
+        apply_form(const Integral<Subtract<Left, Right>> &form,
+                   const Tensor<2, dim, Number>          &gradient,
+                   Tensor<2, dim, Number>                &stress,
+                   double                                 sign = 1.0);
+
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_form(const FormSum<Left, Right>   &form,
                    const Tensor<2, dim, Number> &gradient,
                    Tensor<2, dim, Number>       &stress,
-                   const Coefficients           &coefficients,
                    const double                  sign = 1.0)
         {
-          apply_form(form.left, gradient, stress, coefficients, sign);
-          apply_form(form.right, gradient, stress, coefficients, sign);
+          apply_form(form.left, gradient, stress, sign);
+          apply_form(form.right, gradient, stress, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Left,
-                  typename Right>
+        template <int dim, typename Number, typename Left, typename Right>
         DEAL_II_HOST_DEVICE void
         apply_form(const FormDifference<Left, Right> &form,
                    const Tensor<2, dim, Number>      &gradient,
                    Tensor<2, dim, Number>            &stress,
-                   const Coefficients                &coefficients,
                    const double                       sign = 1.0)
         {
-          apply_form(form.left, gradient, stress, coefficients, sign);
-          apply_form(form.right, gradient, stress, coefficients, -sign);
+          apply_form(form.left, gradient, stress, sign);
+          apply_form(form.right, gradient, stress, -sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_form(const Integral<Expression>   &form,
                    const Tensor<2, dim, Number> &gradient,
                    Tensor<2, dim, Number>       &stress,
-                   const Coefficients           &coefficients,
                    const double                  sign)
         {
-          apply_term(form, gradient, stress, coefficients, sign);
+          apply_term(form, gradient, stress, sign);
         }
 
-        template <int dim,
-                  typename Number,
-                  typename Coefficients,
-                  typename Expression>
+        template <int dim, typename Number, typename Expression>
         DEAL_II_HOST_DEVICE void
         apply_term(const Integral<Expression> &,
                    const Tensor<2, dim, Number> &,
                    Tensor<2, dim, Number> &,
-                   const Coefficients &,
                    const double)
         {
           static_assert(sizeof(Expression) == 0,
@@ -833,67 +596,92 @@ namespace pmf
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
                   typename ConstantNumber,
-                  typename MuTag,
+                  typename MuNumber,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<Multiply<
-            Multiply<Constant<ConstantNumber>, Coefficient<MuTag>>,
+            Multiply<Constant<ConstantNumber>, Coefficient<MuNumber>>,
             Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
                   Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>>
                                        &form,
           const Tensor<2, dim, Number> &gradient,
           Tensor<2, dim, Number>       &stress,
-          const Coefficients           &coefficients,
           const double                  sign)
         {
-          static_assert(
-            std::is_same<MuTag, typename Coefficients::mu_tag>::value,
-            "The shear coefficient binding must match the form");
           add_symmetric_gradient_term(
             stress,
             gradient,
-            static_cast<Number>(coefficients.mu),
+            static_cast<Number>(form.expression.left.right.value),
             static_cast<Number>(sign * form.expression.left.left.value));
         }
 
         template <int dim,
                   typename Number,
-                  typename Coefficients,
-                  typename LambdaTag,
+                  typename LambdaNumber,
                   unsigned int TestIndex,
                   unsigned int TrialIndex>
         DEAL_II_HOST_DEVICE void
         apply_term(
           const Integral<
-            Multiply<Multiply<Coefficient<LambdaTag>,
+            Multiply<Multiply<Coefficient<LambdaNumber>,
                               Divergence<Test<TestIndex, ValueShape::vector>>>,
-                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &,
+                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &form,
           const Tensor<2, dim, Number> &gradient,
           Tensor<2, dim, Number>       &stress,
-          const Coefficients           &coefficients,
           const double                  sign)
         {
-          static_assert(
-            std::is_same<LambdaTag, typename Coefficients::lambda_tag>::value,
-            "The volumetric coefficient binding must match the form");
           add_divergence_term(stress,
                               gradient,
-                              static_cast<Number>(sign * coefficients.lambda));
+                              static_cast<Number>(
+                                sign * form.expression.left.left.value));
         }
+
+        template <int dim, typename Number, typename Left, typename Right>
+        DEAL_II_HOST_DEVICE void
+        apply_form(const Integral<Add<Left, Right>> &form,
+                   const Tensor<2, dim, Number>     &gradient,
+                   Tensor<2, dim, Number>           &stress,
+                   const double                      sign)
+        {
+          apply_form(Integral<Left>{form.expression.left},
+                     gradient,
+                     stress,
+                     sign);
+          apply_form(Integral<Right>{form.expression.right},
+                     gradient,
+                     stress,
+                     sign);
+        }
+
+        template <int dim, typename Number, typename Left, typename Right>
+        DEAL_II_HOST_DEVICE void
+        apply_form(const Integral<Subtract<Left, Right>> &form,
+                   const Tensor<2, dim, Number>          &gradient,
+                   Tensor<2, dim, Number>                &stress,
+                   const double                           sign)
+        {
+          apply_form(Integral<Left>{form.expression.left},
+                     gradient,
+                     stress,
+                     sign);
+          apply_form(Integral<Right>{form.expression.right},
+                     gradient,
+                     stress,
+                     -sign);
+        }
+
       } // namespace internal
 
       /** @brief Quadrature kernel for an expression-template form. */
-      template <typename Form, typename Coefficients>
+      template <typename Form>
       class ElasticityQuadratureKernel
       {
       public:
-        ElasticityQuadratureKernel(Form form, Coefficients coefficients)
+        ElasticityQuadratureKernel(Form form)
           : form(std::move(form))
-          , coefficients(std::move(coefficients))
         {}
 
         template <typename FEEvaluationType>
@@ -906,13 +694,12 @@ namespace pmf
             typename std::remove_cv<decltype(gradient)>::type>::value;
           dealii::Tensor<2, dim, Number> stress;
           stress = Number();
-          internal::apply_form(form, gradient, stress, coefficients, 1.0);
+          internal::apply_form(form, gradient, stress, 1.0);
           phi.submit_gradient(stress, q_point);
         }
 
       private:
-        Form         form;
-        Coefficients coefficients;
+        Form form;
       };
 
       namespace internal
@@ -955,18 +742,10 @@ namespace pmf
                 TotalFieldComponents<TypeList<Rest...>, dim>::value>
         {};
 
-        template <typename CoefficientSymbol>
-        struct CoefficientTagOf;
-
-        template <typename Tag>
-        struct CoefficientTagOf<Coefficient<Tag>>
-        {
-          using type = Tag;
-        };
       } // namespace internal
 
       /** @brief Quadrature kernel for the current two-field Stokes form. */
-      template <int dim, typename Form, typename Coefficients>
+      template <int dim, typename Form>
       class StokesQuadratureKernel
       {
         using Analysis    = FormFields<Form>;
@@ -976,14 +755,10 @@ namespace pmf
         using Pressure    = typename internal::TypeListAt<1, TrialFields>::type;
         using TestVelocity = typename internal::TypeListAt<0, TestFields>::type;
         using TestPressure = typename internal::TypeListAt<1, TestFields>::type;
-        using MuSymbol     = typename internal::
-          TypeListAt<0, typename Analysis::coefficient_tags>::type;
-        using MuTag = typename internal::CoefficientTagOf<MuSymbol>::type;
 
       public:
-        StokesQuadratureKernel(Form form, Coefficients coefficients)
+        StokesQuadratureKernel(Form form)
           : form(std::move(form))
-          , coefficients(std::move(coefficients))
         {
           static_assert(
             Analysis::n_trial_fields == 2 && Analysis::n_test_fields == 2,
@@ -1020,8 +795,8 @@ namespace pmf
           using Number =
             typename std::decay<decltype(velocity_gradient[0][0])>::type;
 
-          const Number mu = static_cast<Number>(
-            internal::coefficient_value<MuTag>(coefficients));
+          const Number mu =
+            static_cast<Number>(internal::single_coefficient_value(form));
           const auto symmetric_gradient =
             Number(0.5) * (velocity_gradient + transpose(velocity_gradient));
           dealii::Tensor<2, dim, Number> stress =
@@ -1036,8 +811,7 @@ namespace pmf
         }
 
       private:
-        Form         form;
-        Coefficients coefficients;
+        Form form;
       };
 
       /**
@@ -1051,21 +825,18 @@ namespace pmf
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients = NoCoefficients,
-                typename VectorType   = dealii::LinearAlgebra::distributed::
-                  Vector<typename Coefficients::value_type>>
+                typename Number = double,
+                typename VectorType =
+                  dealii::LinearAlgebra::distributed::Vector<Number>>
       class MatrixFreeFormOperator
         : public dealii::MatrixFreeOperators::Base<dim, VectorType>
       {
       public:
-        using Number = typename Coefficients::value_type;
         using Data   = dealii::MatrixFree<dim, Number>;
         using Vector = VectorType;
 
-        MatrixFreeFormOperator(std::shared_ptr<const Data> data,
-                               Form                        form,
-                               Coefficients                coefficients = {})
-          : kernel(std::move(form), std::move(coefficients))
+        MatrixFreeFormOperator(std::shared_ptr<const Data> data, Form form)
+          : kernel(std::move(form))
         {
           this->initialize(std::move(data));
         }
@@ -1111,7 +882,7 @@ namespace pmf
             }
         }
 
-        ElasticityQuadratureKernel<Form, Coefficients> kernel;
+        ElasticityQuadratureKernel<Form> kernel;
       };
 
       /**
@@ -1121,24 +892,18 @@ namespace pmf
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients = NoCoefficients,
-                typename VectorType   = dealii::LinearAlgebra::distributed::
-                  Vector<typename Coefficients::value_type,
-                         dealii::MemorySpace::Default>>
+                typename Number     = double,
+                typename VectorType = dealii::LinearAlgebra::distributed::
+                  Vector<Number, dealii::MemorySpace::Default>>
       class PortableMatrixFreeFormOperator
       {
       public:
-        using Number = typename Coefficients::value_type;
         using Data   = dealii::Portable::MatrixFree<dim, Number>;
         using Vector = VectorType;
 
-        PortableMatrixFreeFormOperator(std::shared_ptr<Data> data,
-                                       Form                  form,
-                                       Coefficients          coefficients = {})
+        PortableMatrixFreeFormOperator(std::shared_ptr<Data> data, Form form)
           : data(std::move(data))
-          , cell_operation{ElasticityQuadratureKernel<Form, Coefficients>(
-              std::move(form),
-              std::move(coefficients))}
+          , cell_operation{ElasticityQuadratureKernel<Form>(std::move(form))}
         {}
 
         void
@@ -1161,7 +926,7 @@ namespace pmf
           static constexpr unsigned int n_q_points =
             dealii::Utilities::pow(fe_degree + 1, dim);
 
-          ElasticityQuadratureKernel<Form, Coefficients> kernel;
+          ElasticityQuadratureKernel<Form> kernel;
 
           DEAL_II_HOST_DEVICE void
           operator()(const typename Data::Data                    *cell_data,
@@ -1188,8 +953,7 @@ namespace pmf
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients = NoCoefficients,
-                typename Number       = typename Coefficients::value_type,
+                typename Number = double,
                 typename VectorType =
                   dealii::LinearAlgebra::distributed::Vector<Number>>
       class MatrixFreeScalarFormOperator
@@ -1200,9 +964,8 @@ namespace pmf
         using Vector = VectorType;
 
         MatrixFreeScalarFormOperator(std::shared_ptr<const Data> data,
-                                     Form                        form,
-                                     Coefficients coefficients = {})
-          : kernel(std::move(form), std::move(coefficients))
+                                     Form                        form)
+          : kernel(std::move(form))
         {
           this->initialize(std::move(data));
         }
@@ -1244,16 +1007,15 @@ namespace pmf
             }
         }
 
-        internal::ScalarLaplaceQuadratureKernel<dim, Form, Coefficients> kernel;
+        internal::ScalarLaplaceQuadratureKernel<dim, Form> kernel;
       };
 
       /** @brief Portable::MatrixFree operator for scalar gradient forms. */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients = NoCoefficients,
-                typename Number       = typename Coefficients::value_type,
-                typename VectorType   = dealii::LinearAlgebra::distributed::
+                typename Number     = double,
+                typename VectorType = dealii::LinearAlgebra::distributed::
                   Vector<Number, dealii::MemorySpace::Default>>
       class PortableMatrixFreeScalarFormOperator
       {
@@ -1262,13 +1024,10 @@ namespace pmf
         using Vector = VectorType;
 
         PortableMatrixFreeScalarFormOperator(std::shared_ptr<Data> data,
-                                             Form                  form,
-                                             Coefficients coefficients = {})
+                                             Form                  form)
           : data(std::move(data))
-          , cell_operation{
-              internal::ScalarLaplaceQuadratureKernel<dim, Form, Coefficients>(
-                std::move(form),
-                std::move(coefficients))}
+          , cell_operation{internal::ScalarLaplaceQuadratureKernel<dim, Form>(
+              std::move(form))}
         {}
 
         void
@@ -1290,8 +1049,7 @@ namespace pmf
         {
           static constexpr unsigned int n_q_points =
             dealii::Utilities::pow(fe_degree + 1, dim);
-          internal::ScalarLaplaceQuadratureKernel<dim, Form, Coefficients>
-            kernel;
+          internal::ScalarLaplaceQuadratureKernel<dim, Form> kernel;
 
           DEAL_II_HOST_DEVICE void
           operator()(const typename Data::Data                    *cell_data,
@@ -1319,22 +1077,19 @@ namespace pmf
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients,
-                typename VectorType = dealii::LinearAlgebra::distributed::
-                  BlockVector<typename Coefficients::value_type>>
+                typename Number = double,
+                typename VectorType =
+                  dealii::LinearAlgebra::distributed::BlockVector<Number>>
       class MatrixFreeStokesOperator
         : public dealii::MatrixFreeOperators::Base<dim, VectorType>
       {
       public:
-        using Number = typename Coefficients::value_type;
         using Data   = dealii::MatrixFree<dim, Number>;
         using Vector = VectorType;
-        using Kernel = StokesQuadratureKernel<dim, Form, Coefficients>;
+        using Kernel = StokesQuadratureKernel<dim, Form>;
 
-        MatrixFreeStokesOperator(std::shared_ptr<const Data> data,
-                                 Form                        form,
-                                 Coefficients                coefficients)
-          : kernel(std::move(form), std::move(coefficients))
+        MatrixFreeStokesOperator(std::shared_ptr<const Data> data, Form form)
+          : kernel(std::move(form))
         {
           this->initialize(std::move(data));
         }
@@ -1395,23 +1150,19 @@ namespace pmf
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients,
+                typename Number     = double,
                 typename VectorType = dealii::LinearAlgebra::distributed::
-                  BlockVector<typename Coefficients::value_type,
-                              dealii::MemorySpace::Default>>
+                  BlockVector<Number, dealii::MemorySpace::Default>>
       class PortableMatrixFreeStokesOperator
       {
       public:
-        using Number = typename Coefficients::value_type;
         using Data   = dealii::Portable::MatrixFree<dim, Number>;
         using Vector = VectorType;
-        using Kernel = StokesQuadratureKernel<dim, Form, Coefficients>;
+        using Kernel = StokesQuadratureKernel<dim, Form>;
 
-        PortableMatrixFreeStokesOperator(std::shared_ptr<Data> data,
-                                         Form                  form,
-                                         Coefficients          coefficients)
+        PortableMatrixFreeStokesOperator(std::shared_ptr<Data> data, Form form)
           : data(std::move(data))
-          , cell_operation{Kernel(std::move(form), std::move(coefficients))}
+          , cell_operation{Kernel(std::move(form))}
         {}
 
         void
@@ -1519,151 +1270,133 @@ namespace pmf
        * @brief CPU MatrixFree operator selected from the form's field shape.
        *
        * Scalar forms use scalar FEEvaluation. Vector forms use dim components.
-       * Const and reference qualifiers on forms and bindings are ignored.
+       * Const and reference qualifiers on forms are ignored.
        */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients = NoCoefficients,
-                typename VectorType   = typename std::conditional<
-                    (FormFields<Form>::n_trial_fields > 1),
-                    dealii::LinearAlgebra::distributed::BlockVector<
-                      typename std::decay_t<Coefficients>::value_type>,
-                    dealii::LinearAlgebra::distributed::Vector<
-                      typename std::decay_t<Coefficients>::value_type>>::type>
+                typename Number     = double,
+                typename VectorType = typename std::conditional<
+                  (FormFields<Form>::n_trial_fields > 1),
+                  dealii::LinearAlgebra::distributed::BlockVector<Number>,
+                  dealii::LinearAlgebra::distributed::Vector<Number>>::type>
       using MatrixFreeOperator = typename std::conditional<
         (FormFields<Form>::n_trial_fields > 1),
         MatrixFreeStokesOperator<dim,
                                  fe_degree,
                                  std::decay_t<Form>,
-                                 std::decay_t<Coefficients>,
+                                 Number,
                                  VectorType>,
         typename std::conditional<
           internal::FormFieldInfo<std::decay_t<Form>>::shape ==
             ValueShape::scalar,
-          MatrixFreeScalarFormOperator<
-            dim,
-            fe_degree,
-            std::decay_t<Form>,
-            std::decay_t<Coefficients>,
-            typename std::decay_t<Coefficients>::value_type,
-            VectorType>,
+          MatrixFreeScalarFormOperator<dim,
+                                       fe_degree,
+                                       std::decay_t<Form>,
+                                       Number,
+                                       VectorType>,
           MatrixFreeFormOperator<dim,
                                  fe_degree,
                                  std::decay_t<Form>,
-                                 std::decay_t<Coefficients>,
+                                 Number,
                                  VectorType>>::type>::type;
 
       /**
        * @brief Portable::MatrixFree operator selected from the form shape.
-       * Const and reference qualifiers on forms and bindings are ignored.
+       * Const and reference qualifiers on forms are ignored.
        */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients = NoCoefficients,
-                typename VectorType   = typename std::conditional<
-                    (FormFields<Form>::n_trial_fields > 1),
-                    dealii::LinearAlgebra::distributed::BlockVector<
-                      typename std::decay_t<Coefficients>::value_type,
-                      dealii::MemorySpace::Default>,
-                    dealii::LinearAlgebra::distributed::Vector<
-                      typename std::decay_t<Coefficients>::value_type,
-                      dealii::MemorySpace::Default>>::type>
+                typename Number     = double,
+                typename VectorType = typename std::conditional<
+                  (FormFields<Form>::n_trial_fields > 1),
+                  dealii::LinearAlgebra::distributed::
+                    BlockVector<Number, dealii::MemorySpace::Default>,
+                  dealii::LinearAlgebra::distributed::
+                    Vector<Number, dealii::MemorySpace::Default>>::type>
       using PortableMatrixFreeOperator = typename std::conditional<
         (FormFields<Form>::n_trial_fields > 1),
         PortableMatrixFreeStokesOperator<dim,
                                          fe_degree,
                                          std::decay_t<Form>,
-                                         std::decay_t<Coefficients>,
+                                         Number,
                                          VectorType>,
         typename std::conditional<
           internal::FormFieldInfo<std::decay_t<Form>>::shape ==
             ValueShape::scalar,
-          PortableMatrixFreeScalarFormOperator<
-            dim,
-            fe_degree,
-            std::decay_t<Form>,
-            std::decay_t<Coefficients>,
-            typename std::decay_t<Coefficients>::value_type,
-            VectorType>,
+          PortableMatrixFreeScalarFormOperator<dim,
+                                               fe_degree,
+                                               std::decay_t<Form>,
+                                               Number,
+                                               VectorType>,
           PortableMatrixFreeFormOperator<dim,
                                          fe_degree,
                                          std::decay_t<Form>,
-                                         std::decay_t<Coefficients>,
+                                         Number,
                                          VectorType>>::type>::type;
 
       /**
-       * @brief Create a CPU operator with deduced form and coefficient types.
+       * @brief Create a CPU operator from a form with embedded coefficients.
        * @tparam dim The spatial dimension.
        * @tparam fe_degree The finite-element degree.
        * @param data The MatrixFree data, which may be const.
        * @param form The form expression, copied or moved into the operator.
-       * @param coefficients Constant bindings, if required by the form.
-       * @return The operator selected from the form's field shapes.
-       * Const forms and bindings are accepted and stored as unqualified values.
+       * @return The operator selected from the form and data types.
+       * Const forms are accepted and stored as unqualified values.
        */
-      template <int dim,
-                int fe_degree,
-                typename Data,
-                typename Form,
-                typename Coefficients = NoCoefficients>
+      template <int dim, int fe_degree, typename Data, typename Form>
       auto
-      make_matrix_free_operator(std::shared_ptr<Data> data,
-                                Form                  form,
-                                Coefficients          coefficients = {})
+      make_matrix_free_operator(std::shared_ptr<Data> data, Form form)
       {
-        return MatrixFreeOperator<dim, fe_degree, Form, Coefficients>(
-          std::move(data), std::move(form), std::move(coefficients));
+        return MatrixFreeOperator<dim,
+                                  fe_degree,
+                                  Form,
+                                  typename Data::value_type>(std::move(data),
+                                                             std::move(form));
       }
 
       /**
-       * @brief Create a Portable operator with deduced form and binding types.
+       * @brief Create a Portable operator from a form with embedded coefficients.
        * @tparam dim The spatial dimension.
        * @tparam fe_degree The finite-element degree.
        * @param data The mutable Portable::MatrixFree data.
        * @param form The form expression, copied or moved into the operator.
-       * @param coefficients Constant bindings, if required by the form.
-       * @return The portable operator selected from the form's field shapes.
-       * Const forms and bindings are accepted and stored as unqualified values.
+       * @return The portable operator selected from the form and data types.
+       * Const forms are accepted and stored as unqualified values.
        */
-      template <int dim,
-                int fe_degree,
-                typename Data,
-                typename Form,
-                typename Coefficients = NoCoefficients>
+      template <int dim, int fe_degree, typename Number, typename Form>
       auto
-      make_portable_matrix_free_operator(std::shared_ptr<Data> data,
-                                         Form                  form,
-                                         Coefficients coefficients = {})
+      make_portable_matrix_free_operator(
+        std::shared_ptr<dealii::Portable::MatrixFree<dim, Number>> data,
+        Form                                                       form)
       {
-        return PortableMatrixFreeOperator<dim, fe_degree, Form, Coefficients>(
-          std::move(data), std::move(form), std::move(coefficients));
+        return PortableMatrixFreeOperator<dim, fe_degree, Form, Number>(
+          std::move(data), std::move(form));
       }
 
       /** @brief Backwards-compatible name for the form-driven CPU operator. */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients,
-                typename VectorType = dealii::LinearAlgebra::distributed::
-                  Vector<typename Coefficients::value_type>>
+                typename Number = double,
+                typename VectorType =
+                  dealii::LinearAlgebra::distributed::Vector<Number>>
       using MatrixFreeElasticityOperator =
-        MatrixFreeFormOperator<dim, fe_degree, Form, Coefficients, VectorType>;
+        MatrixFreeFormOperator<dim, fe_degree, Form, Number, VectorType>;
 
       /** @brief Backwards-compatible name for the Portable form operator. */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Coefficients,
+                typename Number     = double,
                 typename VectorType = dealii::LinearAlgebra::distributed::
-                  Vector<typename Coefficients::value_type,
-                         dealii::MemorySpace::Default>>
+                  Vector<Number, dealii::MemorySpace::Default>>
       using PortableMatrixFreeElasticityOperator =
         PortableMatrixFreeFormOperator<dim,
                                        fe_degree,
                                        Form,
-                                       Coefficients,
+                                       Number,
                                        VectorType>;
     } // namespace expression_templates
   } // namespace forms

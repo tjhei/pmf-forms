@@ -35,9 +35,13 @@ main(int argc, char **argv)
   using namespace pmf::forms;
   using namespace pmf::forms::expression_templates;
 
-  const auto u    = trial<ValueShape::vector>();
-  const auto v    = test<ValueShape::vector>();
-  const auto form = integral(inner(sym(grad(v)), sym(grad(u))), dx);
+  const auto u      = trial<ValueShape::vector>();
+  const auto v      = test<ValueShape::vector>();
+  const auto lambda = coefficient(3.0);
+  const auto mu     = coefficient(2.0);
+  const auto form   = integral(2.0 * mu * inner(sym(grad(v)), sym(grad(u))) +
+                               lambda * div(v) * div(u),
+                             dx);
 
   dealii::parallel::distributed::Triangulation<dim> triangulation(
     MPI_COMM_WORLD);
