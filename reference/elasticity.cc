@@ -596,8 +596,8 @@ ElasticityProblem<dim, fe_degree, Number>::solve()
   using LevelMatrixType = PortableMFElasticityOperator<dim, fe_degree>;
   using SmootherPreconditionerType = DiagonalMatrix<VectorType>;
   using SmootherType               = PreconditionChebyshev<LevelMatrixType,
-                                             VectorType,
-                                             SmootherPreconditionerType>;
+                                                           VectorType,
+                                                           SmootherPreconditionerType>;
   using MGTransferType =
     MGTransferMatrixFree<dim, Number, MemorySpace::Default>;
 

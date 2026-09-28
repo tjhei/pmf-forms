@@ -935,8 +935,8 @@ StokesProblem<dim, degree_p, Number>::solve()
   using LevelMatrixType = PortableMFVelocityOperator<dim, degree_u, degree_p>;
   using SmootherPreconditionerType = DiagonalMatrix<VectorType>;
   using SmootherType               = PreconditionChebyshev<LevelMatrixType,
-                                             VectorType,
-                                             SmootherPreconditionerType>;
+                                                           VectorType,
+                                                           SmootherPreconditionerType>;
   using MGTransferType =
     MGTransferMatrixFree<dim, Number, MemorySpace::Default>;
 

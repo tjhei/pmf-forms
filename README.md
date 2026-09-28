@@ -53,6 +53,14 @@ Both factories accept const forms and store their own expression values.
 No form-type alias or `std::decay` is needed. Explicit operator aliases
 also accept `decltype(form)`, including const and reference-qualified types.
 
+Call `op.get_diagonal()` to obtain a const reference to its diagonal
+vector (not the inverse). The first call computes and caches it; later calls
+reuse the cache. This works on const CPU and Portable operators. Call
+`compute_diagonal()` to force recomputation after changing the underlying
+MatrixFree data. Computation is collective over the operator's MPI communicator,
+so all ranks must call consistently. Constrained entries are one; unconstrained
+Stokes pressure entries are zero. Ghost entries are not updated.
+
 ### Weighted Helmholtz
 
 The scalar form can combine a weighted diffusion term and a separately
@@ -145,8 +153,8 @@ stores them by value. A future provider-based overload such as
 evaluation, provider lifetimes, device access, and general kernel lowering
 are not implemented yet. The current mixed lowering supports the Stokes form
 above.
-Assembled `FEValues` operators, boundary and face terms, and diagonal
-computation are also future work. See [plan.md](plan.md) for the roadmap and
+Assembled `FEValues` operators and boundary and face terms are future work.
+See [plan.md](plan.md) for the roadmap and
 status.
 
 ## Build and test

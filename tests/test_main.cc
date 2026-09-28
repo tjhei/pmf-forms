@@ -24,6 +24,74 @@
 
 using namespace pmf::forms;
 
+namespace
+{
+  template <typename Destination, typename Source>
+  void
+  copy_vector(Destination &destination, const Source &source)
+  {
+    destination.import_elements(source, dealii::VectorOperation::insert);
+  }
+
+  template <typename Number, typename DestinationSpace, typename SourceSpace>
+  void
+  copy_vector(
+    dealii::LinearAlgebra::distributed::BlockVector<Number, DestinationSpace>
+      &destination,
+    const dealii::LinearAlgebra::distributed::BlockVector<Number, SourceSpace>
+      &source)
+  {
+    for (unsigned int block = 0; block < source.n_blocks(); ++block)
+      copy_vector(destination.block(block), source.block(block));
+  }
+
+  template <typename CpuOperator, typename PortableOperator>
+  void
+  check_diagonals(const CpuOperator &cpu, const PortableOperator &portable)
+  {
+    const auto &cpu_diagonal      = cpu.get_diagonal();
+    const auto &portable_diagonal = portable.get_diagonal();
+    CHECK(&cpu.get_diagonal() == &cpu_diagonal);
+    CHECK(&portable.get_diagonal() == &portable_diagonal);
+
+    typename CpuOperator::Vector source, image, portable_image, host_diagonal;
+    cpu.initialize_dof_vector(source);
+    cpu.initialize_dof_vector(image);
+    cpu.initialize_dof_vector(portable_image);
+    cpu.initialize_dof_vector(host_diagonal);
+    copy_vector(host_diagonal, portable_diagonal);
+    typename PortableOperator::Vector portable_source, portable_result;
+    portable.initialize_dof_vector(portable_source);
+    portable.initialize_dof_vector(portable_result);
+
+    const auto owned = source.locally_owned_elements();
+    for (dealii::types::global_dof_index index = 0; index < source.size();
+         ++index)
+      {
+        source = 0.0;
+        if (owned.is_element(index))
+          source[index] = 1.0;
+        source.compress(dealii::VectorOperation::insert);
+        source.update_ghost_values();
+        cpu.vmult(image, source);
+        copy_vector(portable_source, source);
+        portable.vmult(portable_result, portable_source);
+        copy_vector(portable_image, portable_result);
+        if (owned.is_element(index))
+          {
+            INFO("diagonal index " << index);
+            CHECK(cpu_diagonal[index] ==
+                  Catch::Approx(image[index]).margin(1e-12));
+            CHECK(host_diagonal[index] ==
+                  Catch::Approx(portable_image[index]).margin(1e-12));
+            CHECK(host_diagonal[index] ==
+                  Catch::Approx(cpu_diagonal[index]).margin(1e-12));
+          }
+        source.zero_out_ghost_values();
+      }
+  }
+} // namespace
+
 int
 main(int argc, char **argv)
 {
@@ -267,6 +335,9 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   constraints.reinit(dof_handler.locally_owned_dofs(),
                      dealii::DoFTools::extract_locally_relevant_dofs(
                        dof_handler));
+  if (dealii::DoFTools::extract_locally_relevant_dofs(dof_handler)
+        .is_element(0))
+    constraints.add_line(0);
   constraints.close();
 
   dealii::MappingQ<dim>   mapping(1);
@@ -324,6 +395,7 @@ TEST_CASE("One expression-template form drives both MatrixFree backends",
   REQUIRE(cpu_destination.l2_norm() > 0.0);
   REQUIRE(portable_destination.l2_norm() ==
           Catch::Approx(cpu_destination.l2_norm()).epsilon(1e-10));
+  check_diagonals(cpu_operator, portable_operator);
 }
 
 TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
@@ -350,6 +422,9 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   constraints.reinit(dof_handler.locally_owned_dofs(),
                      dealii::DoFTools::extract_locally_relevant_dofs(
                        dof_handler));
+  if (dealii::DoFTools::extract_locally_relevant_dofs(dof_handler)
+        .is_element(0))
+    constraints.add_line(0);
   constraints.close();
   dealii::MappingQ<dim>   mapping(1);
   const dealii::QGauss<1> quadrature(degree + 1);
@@ -420,4 +495,82 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
           Catch::Approx(cpu_dst.l2_norm()).epsilon(1e-10));
   REQUIRE(portable_unit_dst.l2_norm() ==
           Catch::Approx(cpu_unit_dst.l2_norm()).epsilon(1e-10));
+  check_diagonals(cpu_op, portable_op);
+  check_diagonals(cpu_unit_op, portable_unit_op);
+  const double diagonal_norm = cpu_op.get_diagonal().l2_norm();
+  cpu_op.compute_diagonal();
+  portable_op.compute_diagonal();
+  CHECK(cpu_op.get_diagonal().l2_norm() == Catch::Approx(diagonal_norm));
+  CHECK(portable_op.get_diagonal().l2_norm() == Catch::Approx(diagonal_norm));
+  CHECK(&cpu_op.get_matrix_diagonal()->get_vector() == &cpu_op.get_diagonal());
+}
+
+TEST_CASE("Stokes diagonals include the zero pressure block",
+          "[forms][diagonal][stokes]")
+{
+  using namespace expression_templates;
+  constexpr int dim    = 2;
+  constexpr int degree = 1;
+  const auto [velocity, pressure] =
+    trial_functions<ValueShape::vector, ValueShape::scalar>();
+  const auto [test_velocity, test_pressure] =
+    test_functions<ValueShape::vector, ValueShape::scalar>();
+  const auto form =
+    integral(2.0 * coefficient(1.7) *
+               inner(sym(grad(test_velocity)), sym(grad(velocity))),
+             dx) -
+    integral(div(test_velocity) * pressure, dx) -
+    integral(test_pressure * div(velocity), dx);
+
+  dealii::parallel::distributed::Triangulation<dim> triangulation(
+    MPI_COMM_WORLD);
+  dealii::GridGenerator::hyper_cube(triangulation);
+  triangulation.refine_global(1);
+  dealii::FESystem<dim>   velocity_fe(dealii::FE_Q<dim>(degree), dim);
+  dealii::FE_Q<dim>       pressure_fe(degree);
+  dealii::DoFHandler<dim> velocity_dofs(triangulation),
+    pressure_dofs(triangulation);
+  velocity_dofs.distribute_dofs(velocity_fe);
+  pressure_dofs.distribute_dofs(pressure_fe);
+  dealii::AffineConstraints<double> velocity_constraints, pressure_constraints;
+  velocity_constraints.reinit(velocity_dofs.locally_owned_dofs(),
+                              dealii::DoFTools::extract_locally_relevant_dofs(
+                                velocity_dofs));
+  pressure_constraints.reinit(pressure_dofs.locally_owned_dofs(),
+                              dealii::DoFTools::extract_locally_relevant_dofs(
+                                pressure_dofs));
+  if (dealii::DoFTools::extract_locally_relevant_dofs(velocity_dofs)
+        .is_element(0))
+    velocity_constraints.add_line(0);
+  if (dealii::DoFTools::extract_locally_relevant_dofs(pressure_dofs)
+        .is_element(0))
+    pressure_constraints.add_line(0);
+  velocity_constraints.close();
+  pressure_constraints.close();
+  const std::vector<const dealii::DoFHandler<dim> *> dof_handlers = {
+    &velocity_dofs, &pressure_dofs};
+  const std::vector<const dealii::AffineConstraints<double> *> constraints = {
+    &velocity_constraints, &pressure_constraints};
+  dealii::MappingQ<dim> mapping(1);
+  dealii::QGauss<1>     quadrature(degree + 1);
+  auto cpu_data = std::make_shared<dealii::MatrixFree<dim, double>>();
+  dealii::MatrixFree<dim, double>::AdditionalData cpu_settings;
+  cpu_settings.mapping_update_flags = dealii::update_values |
+                                      dealii::update_gradients |
+                                      dealii::update_JxW_values;
+  cpu_data->reinit(
+    mapping, dof_handlers, constraints, quadrature, cpu_settings);
+  auto portable_data =
+    std::make_shared<dealii::Portable::MatrixFree<dim, double>>();
+  dealii::Portable::MatrixFree<dim, double>::AdditionalData portable_settings;
+  portable_settings.mapping_update_flags = cpu_settings.mapping_update_flags;
+  portable_data->reinit(
+    mapping, dof_handlers, constraints, quadrature, portable_settings);
+  const auto cpu = make_matrix_free_operator<dim, degree>(cpu_data, form);
+  const auto portable =
+    make_portable_matrix_free_operator<dim, degree>(portable_data, form);
+  check_diagonals(cpu, portable);
+  const auto &pressure_diagonal = cpu.get_diagonal().block(1);
+  for (const auto index : pressure_diagonal.locally_owned_elements())
+    CHECK(pressure_diagonal[index] == (index == 0 ? 1.0 : 0.0));
 }

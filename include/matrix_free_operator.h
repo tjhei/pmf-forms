@@ -13,11 +13,12 @@
 #include <deal.II/matrix_free/operators.h>
 #include <deal.II/matrix_free/portable_fe_evaluation.h>
 #include <deal.II/matrix_free/portable_matrix_free.h>
+#include <deal.II/matrix_free/tools.h>
 
 #include <expression_templates.h>
 
+#include <functional>
 #include <memory>
-#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -29,6 +30,73 @@ namespace pmf
     {
       namespace internal
       {
+        template <typename Kernel>
+        struct PortableDiagonalKernel
+        {
+          Kernel kernel;
+
+          template <typename Evaluation>
+          DEAL_II_HOST_DEVICE void
+          operator()(Evaluation *evaluation, const unsigned int point) const
+          {
+            kernel(*evaluation, point);
+          }
+        };
+
+        template <int dim,
+                  int degree,
+                  int components,
+                  typename Number,
+                  typename VectorType,
+                  typename Kernel>
+        void
+        compute_diagonal(const dealii::MatrixFree<dim, Number> &data,
+                         VectorType                            &diagonal,
+                         const Kernel                          &kernel,
+                         const dealii::EvaluationFlags::EvaluationFlags flags,
+                         const unsigned int field = 0)
+        {
+          using Evaluation =
+            dealii::FEEvaluation<dim, degree, degree + 1, components, Number>;
+          const std::function<void(Evaluation &)> operation =
+            [&kernel, flags](Evaluation &evaluation) {
+              evaluation.evaluate(flags);
+              for (unsigned int point = 0; point < evaluation.n_q_points;
+                   ++point)
+                kernel(evaluation, point);
+              evaluation.integrate(flags);
+            };
+          dealii::MatrixFreeTools::compute_diagonal(data,
+                                                    diagonal,
+                                                    operation,
+                                                    field);
+          for (const auto index : data.get_constrained_dofs(field))
+            diagonal.local_element(index) = Number(1);
+        }
+
+        template <int dim,
+                  int degree,
+                  int components,
+                  typename Number,
+                  typename VectorType,
+                  typename Kernel>
+        void
+        compute_diagonal(const dealii::Portable::MatrixFree<dim, Number> &data,
+                         VectorType   &diagonal,
+                         const Kernel &kernel,
+                         const dealii::EvaluationFlags::EvaluationFlags flags,
+                         const unsigned int field = 0)
+        {
+          dealii::MatrixFreeTools::
+            compute_diagonal<dim, degree, degree + 1, components, Number>(
+              data,
+              diagonal,
+              PortableDiagonalKernel<Kernel>{kernel},
+              flags,
+              flags,
+              field);
+        }
+
         using dealii::Tensor;
         using dealii::trace;
 
@@ -810,6 +878,25 @@ namespace pmf
           pressure_phi.submit_value(-divergence, q);
         }
 
+        /**
+         * @brief Apply the velocity diagonal block at one quadrature point.
+         * @param velocity_phi The velocity evaluation with evaluated gradients.
+         * @param point The quadrature-point index.
+         */
+        template <typename VelocityEvaluation>
+        DEAL_II_HOST_DEVICE void
+        operator()(VelocityEvaluation &velocity_phi,
+                   const unsigned int  point) const
+        {
+          const auto gradient = velocity_phi.get_gradient(point);
+          using Number        = std::decay_t<decltype(gradient[0][0])>;
+          const Number viscosity =
+            Number(internal::single_coefficient_value(form));
+          velocity_phi.submit_gradient(viscosity *
+                                         (gradient + transpose(gradient)),
+                                       point);
+        }
+
       private:
         Form form;
       };
@@ -841,15 +928,46 @@ namespace pmf
           this->initialize(std::move(data));
         }
 
-        /** @brief Compute the diagonal, which is not implemented yet. */
+        /**
+         * @brief Return the diagonal, computing and caching it on first use.
+         * @return The owned diagonal vector (not its inverse).
+         * Constrained entries are one. The first call is collective over the
+         * operator's MPI communicator; all ranks must call it consistently.
+         * The reference remains valid until recomputation or destruction.
+         */
+        const VectorType &
+        get_diagonal() const
+        {
+          if (!cached_diagonal)
+            cached_diagonal = build_diagonal();
+          return cached_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Recompute the diagonal, replacing any cached values.
+         * This collective operation invalidates earlier diagonal references.
+         */
         void
         compute_diagonal() override
         {
-          throw std::logic_error(
-            "diagonal computation is not implemented for this operator");
+          cached_diagonal        = build_diagonal();
+          this->diagonal_entries = cached_diagonal;
         }
 
       private:
+        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        build_diagonal() const
+        {
+          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+          auto &diagonal = result->get_vector();
+          internal::compute_diagonal<dim, fe_degree, dim>(
+            *this->data, diagonal, kernel, dealii::EvaluationFlags::gradients);
+          return result;
+        }
+
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal;
+
         void
         apply_add(VectorType       &destination,
                   const VectorType &source) const override
@@ -920,7 +1038,48 @@ namespace pmf
           data->copy_constrained_values(source, destination, 0);
         }
 
+        /**
+         * @brief Return the diagonal, computing and caching it on first use.
+         * @return The owned diagonal vector (not its inverse).
+         * Constrained entries are one. The first call is collective over the
+         * operator's MPI communicator; all ranks must call it consistently.
+         * The reference remains valid until recomputation or destruction.
+         */
+        const VectorType &
+        get_diagonal() const
+        {
+          if (!cached_diagonal)
+            cached_diagonal = build_diagonal();
+          return cached_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Recompute the diagonal, replacing any cached values.
+         * This collective operation invalidates earlier diagonal references.
+         */
+        void
+        compute_diagonal()
+        {
+          cached_diagonal = build_diagonal();
+        }
+
       private:
+        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        build_diagonal() const
+        {
+          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+          auto &diagonal = result->get_vector();
+          internal::compute_diagonal<dim, fe_degree, dim>(
+            *data,
+            diagonal,
+            cell_operation.kernel,
+            dealii::EvaluationFlags::gradients);
+          return result;
+        }
+
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal;
+
         struct CellOperation
         {
           static constexpr unsigned int n_q_points =
@@ -970,13 +1129,50 @@ namespace pmf
           this->initialize(std::move(data));
         }
 
+        /**
+         * @brief Return the diagonal, computing and caching it on first use.
+         * @return The owned diagonal vector (not its inverse).
+         * Constrained entries are one. The first call is collective over the
+         * operator's MPI communicator; all ranks must call it consistently.
+         * The reference remains valid until recomputation or destruction.
+         */
+        const VectorType &
+        get_diagonal() const
+        {
+          if (!cached_diagonal)
+            cached_diagonal = build_diagonal();
+          return cached_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Recompute the diagonal, replacing any cached values.
+         * This collective operation invalidates earlier diagonal references.
+         */
         void
         compute_diagonal() override
         {
-          throw std::logic_error("diagonal computation is not implemented");
+          cached_diagonal        = build_diagonal();
+          this->diagonal_entries = cached_diagonal;
         }
 
       private:
+        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        build_diagonal() const
+        {
+          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+          auto &diagonal = result->get_vector();
+          internal::compute_diagonal<dim, fe_degree, 1>(
+            *this->data,
+            diagonal,
+            kernel,
+            dealii::EvaluationFlags::values |
+              dealii::EvaluationFlags::gradients);
+          return result;
+        }
+
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal;
+
         void
         apply_add(VectorType &dst, const VectorType &src) const override
         {
@@ -1044,7 +1240,49 @@ namespace pmf
           data->copy_constrained_values(src, dst, 0);
         }
 
+        /**
+         * @brief Return the diagonal, computing and caching it on first use.
+         * @return The owned diagonal vector (not its inverse).
+         * Constrained entries are one. The first call is collective over the
+         * operator's MPI communicator; all ranks must call it consistently.
+         * The reference remains valid until recomputation or destruction.
+         */
+        const VectorType &
+        get_diagonal() const
+        {
+          if (!cached_diagonal)
+            cached_diagonal = build_diagonal();
+          return cached_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Recompute the diagonal, replacing any cached values.
+         * This collective operation invalidates earlier diagonal references.
+         */
+        void
+        compute_diagonal()
+        {
+          cached_diagonal = build_diagonal();
+        }
+
       private:
+        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        build_diagonal() const
+        {
+          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+          auto &diagonal = result->get_vector();
+          internal::compute_diagonal<dim, fe_degree, 1>(
+            *data,
+            diagonal,
+            cell_operation.kernel,
+            dealii::EvaluationFlags::values |
+              dealii::EvaluationFlags::gradients);
+          return result;
+        }
+
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal;
+
         struct CellOperation
         {
           static constexpr unsigned int n_q_points =
@@ -1100,13 +1338,53 @@ namespace pmf
           this->data->initialize_dof_vector(vector);
         }
 
+        /**
+         * @brief Return the diagonal, computing and caching it on first use.
+         * @return The owned diagonal vector (not its inverse).
+         * Constrained entries are one. The first call is collective over the
+         * operator's MPI communicator; all ranks must call it consistently.
+         * The reference remains valid until recomputation or destruction.
+         */
+        const VectorType &
+        get_diagonal() const
+        {
+          if (!cached_diagonal)
+            cached_diagonal = build_diagonal();
+          return cached_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Recompute the diagonal, replacing any cached values.
+         * This collective operation invalidates earlier diagonal references.
+         */
         void
         compute_diagonal() override
         {
-          throw std::logic_error("diagonal computation is not implemented");
+          cached_diagonal        = build_diagonal();
+          this->diagonal_entries = cached_diagonal;
         }
 
       private:
+        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        build_diagonal() const
+        {
+          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+          auto &diagonal = result->get_vector();
+          initialize_dof_vector(diagonal);
+          diagonal = Number();
+          internal::compute_diagonal<dim, fe_degree, dim>(
+            *this->data,
+            diagonal.block(0),
+            kernel,
+            dealii::EvaluationFlags::gradients);
+          for (const auto index : this->data->get_constrained_dofs(1))
+            diagonal.block(1).local_element(index) = Number(1);
+          return result;
+        }
+
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal;
+
         void
         apply_add(VectorType &dst, const VectorType &src) const override
         {
@@ -1179,7 +1457,51 @@ namespace pmf
           data->copy_constrained_values(src, dst);
         }
 
+        /**
+         * @brief Return the diagonal, computing and caching it on first use.
+         * @return The owned diagonal vector (not its inverse).
+         * Constrained entries are one. The first call is collective over the
+         * operator's MPI communicator; all ranks must call it consistently.
+         * The reference remains valid until recomputation or destruction.
+         */
+        const VectorType &
+        get_diagonal() const
+        {
+          if (!cached_diagonal)
+            cached_diagonal = build_diagonal();
+          return cached_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Recompute the diagonal, replacing any cached values.
+         * This collective operation invalidates earlier diagonal references.
+         */
+        void
+        compute_diagonal()
+        {
+          cached_diagonal = build_diagonal();
+        }
+
       private:
+        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        build_diagonal() const
+        {
+          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+          auto &diagonal = result->get_vector();
+          initialize_dof_vector(diagonal);
+          diagonal = Number();
+          internal::compute_diagonal<dim, fe_degree, dim>(
+            *data,
+            diagonal.block(0),
+            cell_operation.kernel,
+            dealii::EvaluationFlags::gradients);
+          data->set_constrained_values(Number(1), diagonal.block(1), 1);
+          return result;
+        }
+
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal;
+
         struct CellOperation
         {
           static constexpr unsigned int n_q_points =
