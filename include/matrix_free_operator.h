@@ -1,10 +1,7 @@
 #ifndef PMF_FORM_MATRIX_FREE_OPERATOR_H
 #define PMF_FORM_MATRIX_FREE_OPERATOR_H
 
-#include <deal.II/base/config.h>
-
 #include <deal.II/base/enable_observer_pointer.h>
-#include <deal.II/base/tensor.h>
 
 #include <deal.II/lac/la_parallel_block_vector.h>
 #include <deal.II/lac/la_parallel_vector.h>
@@ -16,12 +13,10 @@
 #include <deal.II/matrix_free/portable_matrix_free.h>
 #include <deal.II/matrix_free/tools.h>
 
-#include <expression_templates.h>
+#include <cell_form_lowering.h>
 
 #include <functional>
 #include <memory>
-#include <type_traits>
-#include <utility>
 
 namespace pmf
 {
@@ -31,1408 +26,448 @@ namespace pmf
     {
       namespace internal
       {
-        template <typename Kernel>
-        struct PortableDiagonalKernel
+        template <typename Form, typename Field>
+        constexpr dealii::EvaluationFlags::EvaluationFlags field_flags =
+          (FieldRequirements<Form, Field>::value ?
+             dealii::EvaluationFlags::values :
+             dealii::EvaluationFlags::nothing) |
+          (FieldRequirements<Form, Field>::gradient ?
+             dealii::EvaluationFlags::gradients :
+             dealii::EvaluationFlags::nothing);
+
+        template <typename Field, int dim>
+        constexpr unsigned int field_components =
+          Field::shape == ValueShape::scalar ? 1 : dim;
+
+        template <bool mixed, typename Vector>
+        DEAL_II_HOST_DEVICE decltype(auto)
+        field_vector(Vector &vector, const unsigned int index)
         {
-          Kernel kernel;
+          if constexpr (mixed)
+            return vector.block(index);
+          else
+            return (vector);
+        }
+
+        template <typename Form, typename Field, typename Evaluation>
+        struct EvaluationSlot
+        {
+          using TestField = Test<Field::index, Field::shape>;
+          Evaluation                         evaluation;
+          typename Evaluation::value_type    submitted_value;
+          typename Evaluation::gradient_type submitted_gradient;
+
+          template <typename Data>
+          DEAL_II_HOST_DEVICE explicit EvaluationSlot(const Data &data)
+            : evaluation(data, Field::index)
+          {}
+
+          DEAL_II_HOST_DEVICE void
+          clear()
+          {
+            submitted_value    = typename Evaluation::value_type();
+            submitted_gradient = typename Evaluation::gradient_type();
+          }
+
+          template <bool mixed, typename Vector>
+          DEAL_II_HOST_DEVICE void
+          read(const Vector &source)
+          {
+            evaluation.read_dof_values(
+              field_vector<mixed>(source, Field::index));
+            evaluation.evaluate(field_flags<Form, Field>);
+          }
+
+          DEAL_II_HOST_DEVICE void
+          submit(const unsigned int point)
+          {
+            if constexpr (FieldRequirements<Form, TestField>::value)
+              evaluation.submit_value(submitted_value, point);
+            if constexpr (FieldRequirements<Form, TestField>::gradient)
+              evaluation.submit_gradient(submitted_gradient, point);
+          }
+
+          template <bool mixed, typename Vector>
+          DEAL_II_HOST_DEVICE void
+          scatter(Vector &destination)
+          {
+            evaluation.integrate(field_flags<Form, TestField>);
+            evaluation.distribute_local_to_global(
+              field_vector<mixed>(destination, Field::index));
+          }
+        };
+
+        template <int dim,
+                  typename Form,
+                  template <int>
+                  class Evaluation,
+                  typename Fields>
+        struct EvaluationPack;
+
+        template <int dim,
+                  typename Form,
+                  template <int>
+                  class Evaluation,
+                  typename... Fields>
+        struct EvaluationPack<dim, Form, Evaluation, TypeList<Fields...>>
+          : EvaluationSlot<Form,
+                           Fields,
+                           Evaluation<field_components<Fields, dim>>>...
+        {
+          using Number = typename Evaluation<1>::value_type;
+          static constexpr unsigned int dimension = dim;
+          static constexpr bool         mixed     = sizeof...(Fields) > 1;
+          unsigned int                  point     = 0;
+
+          template <typename Field>
+          using Slot = EvaluationSlot<Form,
+                                      Trial<Field::index, Field::shape>,
+                                      Evaluation<field_components<Field, dim>>>;
+
+          template <typename Data>
+          DEAL_II_HOST_DEVICE explicit EvaluationPack(const Data &data)
+            : EvaluationSlot<Form,
+                             Fields,
+                             Evaluation<field_components<Fields, dim>>>(data)...
+          {}
+
+          void
+          reinit(const unsigned int cell)
+          {
+            (static_cast<Slot<Fields> &>(*this).evaluation.reinit(cell), ...);
+          }
+
+          template <typename Vector>
+          DEAL_II_HOST_DEVICE void
+          read(const Vector &source)
+          {
+            (static_cast<Slot<Fields> &>(*this).template read<mixed>(source),
+             ...);
+          }
+
+          DEAL_II_HOST_DEVICE void
+          clear()
+          {
+            (static_cast<Slot<Fields> &>(*this).clear(), ...);
+          }
+
+          DEAL_II_HOST_DEVICE void
+          submit()
+          {
+            (static_cast<Slot<Fields> &>(*this).submit(point), ...);
+          }
+
+          template <typename Vector>
+          DEAL_II_HOST_DEVICE void
+          scatter(Vector &destination)
+          {
+            (static_cast<Slot<Fields> &>(*this).template scatter<mixed>(
+               destination),
+             ...);
+          }
+
+          template <typename Field>
+          DEAL_II_HOST_DEVICE auto
+          value() const
+          {
+            return static_cast<const Slot<Field> &>(*this).evaluation.get_value(
+              point);
+          }
+
+          template <typename Field>
+          DEAL_II_HOST_DEVICE auto
+          gradient() const
+          {
+            return static_cast<const Slot<Field> &>(*this)
+              .evaluation.get_gradient(point);
+          }
+
+          template <typename Field, typename Value>
+          DEAL_II_HOST_DEVICE void
+          submit_value(const Value &value)
+          {
+            static_cast<Slot<Field> &>(*this).submitted_value += value;
+          }
+
+          template <typename Field, typename GradientType>
+          DEAL_II_HOST_DEVICE void
+          submit_gradient(const GradientType &gradient)
+          {
+            static_cast<Slot<Field> &>(*this).submitted_gradient += gradient;
+          }
+        };
+
+        template <int dim, int degree, typename Number>
+        struct CpuEvaluation
+        {
+          template <int components>
+          using type =
+            dealii::FEEvaluation<dim, degree, degree + 1, components, Number>;
+        };
+
+        template <int dim, int degree, typename Number>
+        struct PortableEvaluation
+        {
+          template <int components>
+          using type = dealii::Portable::
+            FEEvaluation<dim, degree, degree + 1, components, Number>;
+        };
+
+        template <typename TensorType>
+        struct TensorNumber;
+        template <int rank, int dim, typename Number>
+        struct TensorNumber<dealii::Tensor<rank, dim, Number>>
+        {
+          using type = Number;
+        };
+
+        template <int dim, typename SelectedField, typename Evaluation>
+        struct DiagonalContext
+        {
+          using Number =
+            typename TensorNumber<typename Evaluation::gradient_type>::type;
+          static constexpr unsigned int      dimension = dim;
+          Evaluation                        &evaluation;
+          unsigned int                       point;
+          typename Evaluation::value_type    submitted_value{};
+          typename Evaluation::gradient_type submitted_gradient{};
+
+          template <typename Field>
+          DEAL_II_HOST_DEVICE auto
+          value() const
+          {
+            if constexpr (Field::index == SelectedField::index)
+              return evaluation.get_value(point);
+            else if constexpr (Field::shape == ValueShape::scalar)
+              return Number();
+            else
+              return dealii::Tensor<1, dim, Number>();
+          }
+
+          template <typename Field>
+          DEAL_II_HOST_DEVICE auto
+          gradient() const
+          {
+            if constexpr (Field::index == SelectedField::index)
+              return evaluation.get_gradient(point);
+            else
+              return dealii::Tensor < Field::shape == ValueShape::scalar ? 1 :
+                                                                           2,
+                     dim, Number > ();
+          }
+
+          template <typename Field, typename Value>
+          DEAL_II_HOST_DEVICE void
+          submit_value(const Value &value)
+          {
+            if constexpr (Field::index == SelectedField::index)
+              submitted_value += value;
+          }
+
+          template <typename Field, typename GradientType>
+          DEAL_II_HOST_DEVICE void
+          submit_gradient(const GradientType &gradient)
+          {
+            if constexpr (Field::index == SelectedField::index)
+              submitted_gradient += gradient;
+          }
+        };
+
+        template <int dim, typename Form, typename Field>
+        struct DiagonalKernel
+        {
+          BilinearCellKernel<Form> kernel;
+          static constexpr auto    flags =
+            field_flags<Form, Field> |
+            field_flags<Form, Test<Field::index, Field::shape>>;
+
+          template <typename Evaluation>
+          DEAL_II_HOST_DEVICE void
+          operator()(Evaluation &evaluation, const unsigned int point) const
+          {
+            DiagonalContext<dim, Field, Evaluation> context{evaluation, point};
+            kernel(context);
+            if constexpr ((flags & dealii::EvaluationFlags::values) != 0)
+              evaluation.submit_value(context.submitted_value, point);
+            if constexpr ((flags & dealii::EvaluationFlags::gradients) != 0)
+              evaluation.submit_gradient(context.submitted_gradient, point);
+          }
 
           template <typename Evaluation>
           DEAL_II_HOST_DEVICE void
           operator()(Evaluation *evaluation, const unsigned int point) const
           {
-            kernel(*evaluation, point);
+            (*this)(*evaluation, point);
           }
         };
 
         template <int dim,
                   int degree,
-                  int components,
+                  typename Form,
+                  typename Field,
                   typename Number,
-                  typename VectorType,
-                  typename Kernel>
+                  typename Vector>
         void
-        compute_diagonal(const dealii::MatrixFree<dim, Number> &data,
-                         VectorType                            &diagonal,
-                         const Kernel                          &kernel,
-                         const dealii::EvaluationFlags::EvaluationFlags flags,
-                         const unsigned int field = 0)
+        compute_field_diagonal(const dealii::MatrixFree<dim, Number> &data,
+                               Vector                                &diagonal,
+                               const BilinearCellKernel<Form>        &kernel)
         {
-          data.initialize_dof_vector(diagonal, field);
           using Evaluation =
-            dealii::FEEvaluation<dim, degree, degree + 1, components, Number>;
+            typename CpuEvaluation<dim, degree, Number>::template type<
+              field_components<Field, dim>>;
+          using Kernel = DiagonalKernel<dim, Form, Field>;
           const std::function<void(Evaluation &)> operation =
-            [&kernel, flags](Evaluation &evaluation) {
-              evaluation.evaluate(flags);
+            [&kernel](Evaluation &evaluation) {
+              evaluation.evaluate(Kernel::flags);
+              const Kernel diagonal_kernel{kernel};
               for (unsigned int point = 0; point < evaluation.n_q_points;
                    ++point)
-                kernel(evaluation, point);
-              evaluation.integrate(flags);
+                diagonal_kernel(evaluation, point);
+              evaluation.integrate(Kernel::flags);
             };
           dealii::MatrixFreeTools::compute_diagonal(data,
                                                     diagonal,
                                                     operation,
-                                                    field);
-          for (const auto index : data.get_constrained_dofs(field))
+                                                    Field::index);
+          for (const auto index : data.get_constrained_dofs(Field::index))
             diagonal.local_element(index) = Number(1);
         }
 
         template <int dim,
                   int degree,
-                  int components,
+                  typename Form,
+                  typename Field,
                   typename Number,
-                  typename VectorType,
-                  typename Kernel>
+                  typename Vector>
         void
-        compute_diagonal(const dealii::Portable::MatrixFree<dim, Number> &data,
-                         VectorType   &diagonal,
-                         const Kernel &kernel,
-                         const dealii::EvaluationFlags::EvaluationFlags flags,
-                         const unsigned int field = 0)
+        compute_field_diagonal(
+          const dealii::Portable::MatrixFree<dim, Number> &data,
+          Vector                                          &diagonal,
+          const BilinearCellKernel<Form>                  &kernel)
         {
-          dealii::MatrixFreeTools::
-            compute_diagonal<dim, degree, degree + 1, components, Number>(
-              data,
-              diagonal,
-              PortableDiagonalKernel<Kernel>{kernel},
-              flags,
-              flags,
-              field);
+          using Kernel = DiagonalKernel<dim, Form, Field>;
+          dealii::MatrixFreeTools::compute_diagonal<
+            dim,
+            degree,
+            degree + 1,
+            field_components<Field, dim>,
+            Number>(data,
+                    diagonal,
+                    Kernel{kernel},
+                    Kernel::flags,
+                    Kernel::flags,
+                    Field::index);
         }
 
-        using dealii::Tensor;
-        using dealii::trace;
-
-        template <typename Expression>
-        struct CoefficientValue;
-
-        template <typename Number>
-        struct CoefficientValue<Coefficient<Number>>
+        template <int dim,
+                  int degree,
+                  typename Form,
+                  typename Data,
+                  typename Vector,
+                  typename... Fields>
+        void
+        compute_diagonal(const Data                     &data,
+                         Vector                         &diagonal,
+                         const BilinearCellKernel<Form> &kernel,
+                         TypeList<Fields...>)
         {
-          DEAL_II_HOST_DEVICE static Number
-          get(const Coefficient<Number> &expression)
-          {
-            return expression.value;
-          }
+          data.initialize_dof_vector(diagonal);
+          (compute_field_diagonal<dim, degree, Form, Fields>(
+             data,
+             field_vector<(sizeof...(Fields) > 1)>(diagonal, Fields::index),
+             kernel),
+           ...);
+        }
+
+        template <typename Number, typename Space>
+        void
+        invert_diagonal(
+          dealii::LinearAlgebra::distributed::Vector<Number, Space> &inverse,
+          const dealii::LinearAlgebra::distributed::Vector<Number, Space>
+            &diagonal)
+        {
+          using ExecutionSpace = typename Space::kokkos_space::execution_space;
+          auto       *entries  = inverse.get_values();
+          const auto *diagonal_entries = diagonal.get_values();
+          Kokkos::parallel_for(
+            "pmf inverse diagonal",
+            Kokkos::RangePolicy<ExecutionSpace>(0,
+                                                inverse.locally_owned_size()),
+            KOKKOS_LAMBDA(const unsigned int index) {
+              entries[index] = Number(1) / diagonal_entries[index];
+            });
+          ExecutionSpace().fence();
+        }
+
+        template <typename Number, typename Space>
+        void
+        invert_diagonal(
+          dealii::LinearAlgebra::distributed::BlockVector<Number, Space>
+            &inverse,
+          const dealii::LinearAlgebra::distributed::BlockVector<Number, Space>
+            &diagonal)
+        {
+          for (unsigned int block = 0; block < inverse.n_blocks(); ++block)
+            invert_diagonal(inverse.block(block), diagonal.block(block));
+        }
+
+        template <typename Form, typename Fields>
+        struct ValidateFields;
+
+        template <typename Form, typename... Fields>
+        struct ValidateFields<Form, TypeList<Fields...>>
+        {
+          static_assert(sizeof...(Fields) > 0,
+                        "a bilinear form must contain fields");
+          static_assert(((Fields::shape == ValueShape::scalar ||
+                          Fields::shape == ValueShape::vector) &&
+                         ...),
+                        "only scalar and vector fields are supported");
+          static_assert(
+            std::is_same<
+              typename FormFields<Form>::test_fields,
+              TypeList<Test<Fields::index, Fields::shape>...>>::value,
+            "trial and test fields must have matching indices and shapes");
+          static_assert(((Fields::index < sizeof...(Fields)) && ...),
+                        "field indices must be contiguous starting at zero");
         };
-
-        template <typename Expression>
-        struct CoefficientValue<Integral<Expression>>
-        {
-          DEAL_II_HOST_DEVICE static auto
-          get(const Integral<Expression> &form)
-          {
-            return CoefficientValue<Expression>::get(form.expression);
-          }
-        };
-
-#define PMF_FORM_COEFFICIENT_VALUE_BINARY(Node)                \
-  template <typename Left, typename Right>                     \
-  struct CoefficientValue<Node<Left, Right>>                   \
-  {                                                            \
-    DEAL_II_HOST_DEVICE static auto                            \
-    get(const Node<Left, Right> &expression)                   \
-    {                                                          \
-      if constexpr (FormFields<Left>::n_coefficients > 0)      \
-        return CoefficientValue<Left>::get(expression.left);   \
-      else                                                     \
-        return CoefficientValue<Right>::get(expression.right); \
-    }                                                          \
-  }
-
-        PMF_FORM_COEFFICIENT_VALUE_BINARY(Add);
-        PMF_FORM_COEFFICIENT_VALUE_BINARY(Subtract);
-        PMF_FORM_COEFFICIENT_VALUE_BINARY(Multiply);
-        PMF_FORM_COEFFICIENT_VALUE_BINARY(FormSum);
-        PMF_FORM_COEFFICIENT_VALUE_BINARY(FormDifference);
-#undef PMF_FORM_COEFFICIENT_VALUE_BINARY
-
-        template <typename Form>
-        DEAL_II_HOST_DEVICE auto
-        single_coefficient_value(const Form &form)
-        {
-          static_assert(FormFields<Form>::n_coefficients == 1,
-                        "expected exactly one coefficient occurrence");
-          return CoefficientValue<Form>::get(form);
-        }
-
-        template <typename TensorType>
-        struct TensorDimension;
-
-        template <int dim, typename Number>
-        struct TensorDimension<Tensor<2, dim, Number>>
-          : std::integral_constant<int, dim>
-        {};
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_term(
-          const Integral<Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
-                               Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
-            &,
-          const Tensor<1, dim, Number> &gradient,
-          Tensor<1, dim, Number>       &flux,
-          const Number                  sign)
-        {
-          flux += sign * gradient;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename CoefficientNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_term(
-          const Integral<
-            Multiply<Coefficient<CoefficientNumber>,
-                     Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
-                           Gradient<Trial<TrialIndex, ValueShape::scalar>>>>>
-                                       &form,
-          const Tensor<1, dim, Number> &gradient,
-          Tensor<1, dim, Number>       &flux,
-          const Number                  sign)
-        {
-          flux += (sign * Number(form.expression.left.value)) * gradient;
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_form(const FormSum<Left, Right>   &form,
-                          const Tensor<1, dim, Number> &gradient,
-                          Tensor<1, dim, Number>       &flux,
-                          const Number                  sign)
-        {
-          apply_scalar_form(form.left, gradient, flux, sign);
-          apply_scalar_form(form.right, gradient, flux, sign);
-        }
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_form(const Integral<Expression>   &form,
-                          const Tensor<1, dim, Number> &gradient,
-                          Tensor<1, dim, Number>       &flux,
-                          const Number                  sign)
-        {
-          apply_scalar_term(form, gradient, flux, sign);
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_form(const FormDifference<Left, Right> &form,
-                          const Tensor<1, dim, Number>      &gradient,
-                          Tensor<1, dim, Number>            &flux,
-                          const Number                       sign)
-        {
-          apply_scalar_form(form.left, gradient, flux, sign);
-          apply_scalar_form(form.right, gradient, flux, -sign);
-        }
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(const Expression &,
-                                const Number,
-                                const Tensor<1, dim, Number> &,
-                                Number &,
-                                Tensor<1, dim, Number> &,
-                                const Number)
-        {
-          static_assert(sizeof(Expression) == 0,
-                        "unsupported scalar bilinear expression");
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
-                      Gradient<Trial<TrialIndex, ValueShape::scalar>>> &,
-          const Number,
-          const Tensor<1, dim, Number> &gradient,
-          Number &,
-          Tensor<1, dim, Number> &flux,
-          const Number            sign)
-        {
-          flux += sign * gradient;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename ConstantNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Constant<ConstantNumber>,
-                         Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
-                               Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
-            &expression,
-          const Number,
-          const Tensor<1, dim, Number> &gradient,
-          Number &,
-          Tensor<1, dim, Number> &flux,
-          const Number            sign)
-        {
-          flux += (sign * Number(expression.left.value)) * gradient;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename CoefficientNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Coefficient<CoefficientNumber>,
-                         Inner<Gradient<Test<TestIndex, ValueShape::scalar>>,
-                               Gradient<Trial<TrialIndex, ValueShape::scalar>>>>
-            &expression,
-          const Number,
-          const Tensor<1, dim, Number> &gradient,
-          Number &,
-          Tensor<1, dim, Number> &flux,
-          const Number            sign)
-        {
-          flux += (sign * Number(expression.left.value)) * gradient;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Test<TestIndex, ValueShape::scalar>,
-                         Trial<TrialIndex, ValueShape::scalar>> &,
-          const Number value,
-          const Tensor<1, dim, Number> &,
-          Number &submitted_value,
-          Tensor<1, dim, Number> &,
-          const Number sign)
-        {
-          submitted_value += sign * value;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename ConstantNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Constant<ConstantNumber>,
-                         Multiply<Test<TestIndex, ValueShape::scalar>,
-                                  Trial<TrialIndex, ValueShape::scalar>>>
-                      &constant,
-          const Number value,
-          const Tensor<1, dim, Number> &,
-          Number &submitted_value,
-          Tensor<1, dim, Number> &,
-          const Number sign)
-        {
-          submitted_value += (sign * Number(constant.left.value)) * value;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename ConstantNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Test<TestIndex, ValueShape::scalar>,
-                         Multiply<Constant<ConstantNumber>,
-                                  Trial<TrialIndex, ValueShape::scalar>>>
-                      &expression,
-          const Number value,
-          const Tensor<1, dim, Number> &,
-          Number &submitted_value,
-          Tensor<1, dim, Number> &,
-          const Number sign)
-        {
-          submitted_value +=
-            (sign * Number(expression.right.left.value)) * value;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename ConstantNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Multiply<Constant<ConstantNumber>,
-                                  Test<TestIndex, ValueShape::scalar>>,
-                         Trial<TrialIndex, ValueShape::scalar>> &expression,
-          const Number                                           value,
-          const Tensor<1, dim, Number> &,
-          Number &submitted_value,
-          Tensor<1, dim, Number> &,
-          const Number sign)
-        {
-          submitted_value +=
-            (sign * Number(expression.left.left.value)) * value;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename CoefficientNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Coefficient<CoefficientNumber>,
-                         Multiply<Test<TestIndex, ValueShape::scalar>,
-                                  Trial<TrialIndex, ValueShape::scalar>>>
-                      &expression,
-          const Number value,
-          const Tensor<1, dim, Number> &,
-          Number &submitted_value,
-          Tensor<1, dim, Number> &,
-          const Number sign)
-        {
-          submitted_value += sign * Number(expression.left.value) * value;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex,
-                  typename CoefficientNumber>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(
-          const Multiply<Multiply<Coefficient<CoefficientNumber>,
-                                  Test<TestIndex, ValueShape::scalar>>,
-                         Trial<TrialIndex, ValueShape::scalar>> &expression,
-          const Number                                           value,
-          const Tensor<1, dim, Number> &,
-          Number &submitted_value,
-          Tensor<1, dim, Number> &,
-          const Number sign)
-        {
-          submitted_value += sign * Number(expression.left.left.value) * value;
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(const Add<Left, Right>       &expression,
-                                const Number                  value,
-                                const Tensor<1, dim, Number> &gradient,
-                                Number                       &submitted_value,
-                                Tensor<1, dim, Number>       &flux,
-                                const Number                  sign)
-        {
-          apply_scalar_expression(
-            expression.left, value, gradient, submitted_value, flux, sign);
-          apply_scalar_expression(
-            expression.right, value, gradient, submitted_value, flux, sign);
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_expression(const Subtract<Left, Right>  &expression,
-                                const Number                  value,
-                                const Tensor<1, dim, Number> &gradient,
-                                Number                       &submitted_value,
-                                Tensor<1, dim, Number>       &flux,
-                                const Number                  sign)
-        {
-          apply_scalar_expression(
-            expression.left, value, gradient, submitted_value, flux, sign);
-          apply_scalar_expression(
-            expression.right, value, gradient, submitted_value, flux, -sign);
-        }
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_form(const Integral<Expression>   &form,
-                          const Number                  value,
-                          const Tensor<1, dim, Number> &gradient,
-                          Number                       &submitted_value,
-                          Tensor<1, dim, Number>       &flux,
-                          const Number                  sign)
-        {
-          apply_scalar_expression(
-            form.expression, value, gradient, submitted_value, flux, sign);
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_form(const FormSum<Left, Right>   &form,
-                          const Number                  value,
-                          const Tensor<1, dim, Number> &gradient,
-                          Number                       &submitted_value,
-                          Tensor<1, dim, Number>       &flux,
-                          const Number                  sign)
-        {
-          apply_scalar_form(
-            form.left, value, gradient, submitted_value, flux, sign);
-          apply_scalar_form(
-            form.right, value, gradient, submitted_value, flux, sign);
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_scalar_form(const FormDifference<Left, Right> &form,
-                          const Number                       value,
-                          const Tensor<1, dim, Number>      &gradient,
-                          Number                            &submitted_value,
-                          Tensor<1, dim, Number>            &flux,
-                          const Number                       sign)
-        {
-          apply_scalar_form(
-            form.left, value, gradient, submitted_value, flux, sign);
-          apply_scalar_form(
-            form.right, value, gradient, submitted_value, flux, -sign);
-        }
-
-        template <int dim, typename Form>
-        class ScalarLaplaceQuadratureKernel
-        {
-        public:
-          ScalarLaplaceQuadratureKernel(Form form)
-            : form(std::move(form))
-          {}
-
-          template <typename FEEvaluationType>
-          DEAL_II_HOST_DEVICE void
-          operator()(FEEvaluationType &phi, const unsigned int q) const
-          {
-            const auto value    = phi.get_value(q);
-            const auto gradient = phi.get_gradient(q);
-            using Number = typename std::decay<decltype(gradient[0])>::type;
-            dealii::Tensor<1, dim, Number> flux;
-            flux                   = Number();
-            Number submitted_value = Number();
-            apply_scalar_form(
-              form, Number(value), gradient, submitted_value, flux, Number(1));
-            phi.submit_value(submitted_value, q);
-            phi.submit_gradient(flux, q);
-          }
-
-        private:
-          Form form;
-        };
-
-        template <int dim, typename Number>
-        DEAL_II_HOST_DEVICE void
-        add_symmetric_gradient_term(Tensor<2, dim, Number>       &stress,
-                                    const Tensor<2, dim, Number> &gradient,
-                                    const Number                  mu,
-                                    const Number                  factor)
-        {
-          stress +=
-            (factor * mu * Number(0.5)) * (gradient + transpose(gradient));
-        }
-
-        template <int dim, typename Number>
-        DEAL_II_HOST_DEVICE void
-        add_divergence_term(Tensor<2, dim, Number>       &stress,
-                            const Tensor<2, dim, Number> &gradient,
-                            const Number                  lambda)
-        {
-          const Number div_u = trace(gradient);
-          for (unsigned int d = 0; d < dim; ++d)
-            stress[d][d] += lambda * div_u;
-        }
-
-        template <int dim,
-                  typename Number,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_term(
-          const Integral<
-            Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
-                  Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>
-            &,
-          const Tensor<2, dim, Number> &gradient,
-          Tensor<2, dim, Number>       &stress,
-          const double                  sign)
-        {
-          add_symmetric_gradient_term(stress,
-                                      gradient,
-                                      Number(1),
-                                      Number(sign));
-        }
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const Integral<Expression> &,
-                   const Tensor<2, dim, Number> &,
-                   Tensor<2, dim, Number> &,
-                   double = 1.0);
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_term(const Integral<Expression> &,
-                   const Tensor<2, dim, Number> &,
-                   Tensor<2, dim, Number> &,
-                   double);
-
-        template <int dim,
-                  typename Number,
-                  typename ConstantNumber,
-                  typename MuNumber,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_term(
-          const Integral<Multiply<
-            Multiply<Constant<ConstantNumber>, Coefficient<MuNumber>>,
-            Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
-                  Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>>
-            &,
-          const Tensor<2, dim, Number> &,
-          Tensor<2, dim, Number> &,
-          double);
-
-        template <int dim,
-                  typename Number,
-                  typename LambdaNumber,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_term(
-          const Integral<
-            Multiply<Multiply<Coefficient<LambdaNumber>,
-                              Divergence<Test<TestIndex, ValueShape::vector>>>,
-                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &form,
-          const Tensor<2, dim, Number> &,
-          Tensor<2, dim, Number> &,
-          double);
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const Integral<Add<Left, Right>> &form,
-                   const Tensor<2, dim, Number>     &gradient,
-                   Tensor<2, dim, Number>           &stress,
-                   double                            sign = 1.0);
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const Integral<Subtract<Left, Right>> &form,
-                   const Tensor<2, dim, Number>          &gradient,
-                   Tensor<2, dim, Number>                &stress,
-                   double                                 sign = 1.0);
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const FormSum<Left, Right>   &form,
-                   const Tensor<2, dim, Number> &gradient,
-                   Tensor<2, dim, Number>       &stress,
-                   const double                  sign = 1.0)
-        {
-          apply_form(form.left, gradient, stress, sign);
-          apply_form(form.right, gradient, stress, sign);
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const FormDifference<Left, Right> &form,
-                   const Tensor<2, dim, Number>      &gradient,
-                   Tensor<2, dim, Number>            &stress,
-                   const double                       sign = 1.0)
-        {
-          apply_form(form.left, gradient, stress, sign);
-          apply_form(form.right, gradient, stress, -sign);
-        }
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const Integral<Expression>   &form,
-                   const Tensor<2, dim, Number> &gradient,
-                   Tensor<2, dim, Number>       &stress,
-                   const double                  sign)
-        {
-          apply_term(form, gradient, stress, sign);
-        }
-
-        template <int dim, typename Number, typename Expression>
-        DEAL_II_HOST_DEVICE void
-        apply_term(const Integral<Expression> &,
-                   const Tensor<2, dim, Number> &,
-                   Tensor<2, dim, Number> &,
-                   const double)
-        {
-          static_assert(sizeof(Expression) == 0,
-                        "This MatrixFree backend currently supports the "
-                        "isotropic elasticity expression patterns only");
-        }
-
-        template <int dim,
-                  typename Number,
-                  typename ConstantNumber,
-                  typename MuNumber,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_term(
-          const Integral<Multiply<
-            Multiply<Constant<ConstantNumber>, Coefficient<MuNumber>>,
-            Inner<Symmetrize<Gradient<Test<TestIndex, ValueShape::vector>>>,
-                  Symmetrize<Gradient<Trial<TrialIndex, ValueShape::vector>>>>>>
-                                       &form,
-          const Tensor<2, dim, Number> &gradient,
-          Tensor<2, dim, Number>       &stress,
-          const double                  sign)
-        {
-          add_symmetric_gradient_term(
-            stress,
-            gradient,
-            static_cast<Number>(form.expression.left.right.value),
-            static_cast<Number>(sign * form.expression.left.left.value));
-        }
-
-        template <int dim,
-                  typename Number,
-                  typename LambdaNumber,
-                  unsigned int TestIndex,
-                  unsigned int TrialIndex>
-        DEAL_II_HOST_DEVICE void
-        apply_term(
-          const Integral<
-            Multiply<Multiply<Coefficient<LambdaNumber>,
-                              Divergence<Test<TestIndex, ValueShape::vector>>>,
-                     Divergence<Trial<TrialIndex, ValueShape::vector>>>> &form,
-          const Tensor<2, dim, Number> &gradient,
-          Tensor<2, dim, Number>       &stress,
-          const double                  sign)
-        {
-          add_divergence_term(stress,
-                              gradient,
-                              static_cast<Number>(
-                                sign * form.expression.left.left.value));
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const Integral<Add<Left, Right>> &form,
-                   const Tensor<2, dim, Number>     &gradient,
-                   Tensor<2, dim, Number>           &stress,
-                   const double                      sign)
-        {
-          apply_form(Integral<Left>{form.expression.left},
-                     gradient,
-                     stress,
-                     sign);
-          apply_form(Integral<Right>{form.expression.right},
-                     gradient,
-                     stress,
-                     sign);
-        }
-
-        template <int dim, typename Number, typename Left, typename Right>
-        DEAL_II_HOST_DEVICE void
-        apply_form(const Integral<Subtract<Left, Right>> &form,
-                   const Tensor<2, dim, Number>          &gradient,
-                   Tensor<2, dim, Number>                &stress,
-                   const double                           sign)
-        {
-          apply_form(Integral<Left>{form.expression.left},
-                     gradient,
-                     stress,
-                     sign);
-          apply_form(Integral<Right>{form.expression.right},
-                     gradient,
-                     stress,
-                     -sign);
-        }
-
       } // namespace internal
-
-      /** @brief Quadrature kernel for an expression-template form. */
-      template <typename Form>
-      class ElasticityQuadratureKernel
-      {
-      public:
-        ElasticityQuadratureKernel(Form form)
-          : form(std::move(form))
-        {}
-
-        template <typename FEEvaluationType>
-        DEAL_II_HOST_DEVICE void
-        operator()(FEEvaluationType &phi, const unsigned int q_point) const
-        {
-          const auto gradient = phi.get_gradient(q_point);
-          using Number = typename std::decay<decltype(gradient[0][0])>::type;
-          constexpr int dim = internal::TensorDimension<
-            typename std::remove_cv<decltype(gradient)>::type>::value;
-          dealii::Tensor<2, dim, Number> stress;
-          stress = Number();
-          internal::apply_form(form, gradient, stress, 1.0);
-          phi.submit_gradient(stress, q_point);
-        }
-
-      private:
-        Form form;
-      };
-
-      namespace internal
-      {
-        template <typename Field, int dim>
-        struct FieldComponentCount
-          : std::integral_constant<unsigned int,
-                                   Field::shape == ValueShape::scalar ? 1 : dim>
-        {};
-
-        template <typename Fields, unsigned int index, int dim>
-        struct FieldComponentOffset;
-
-        template <typename First, typename... Rest, int dim>
-        struct FieldComponentOffset<TypeList<First, Rest...>, 0, dim>
-          : std::integral_constant<unsigned int, 0>
-        {};
-
-        template <typename First, typename... Rest, unsigned int index, int dim>
-        struct FieldComponentOffset<TypeList<First, Rest...>, index, dim>
-          : std::integral_constant<
-              unsigned int,
-              FieldComponentCount<First, dim>::value +
-                FieldComponentOffset<TypeList<Rest...>, index - 1, dim>::value>
-        {};
-
-        template <typename Fields, int dim>
-        struct TotalFieldComponents;
-
-        template <int dim>
-        struct TotalFieldComponents<TypeList<>, dim>
-          : std::integral_constant<unsigned int, 0>
-        {};
-
-        template <typename First, typename... Rest, int dim>
-        struct TotalFieldComponents<TypeList<First, Rest...>, dim>
-          : std::integral_constant<
-              unsigned int,
-              FieldComponentCount<First, dim>::value +
-                TotalFieldComponents<TypeList<Rest...>, dim>::value>
-        {};
-
-      } // namespace internal
-
-      /** @brief Quadrature kernel for the current two-field Stokes form. */
-      template <int dim, typename Form>
-      class StokesQuadratureKernel
-      {
-        using Analysis    = FormFields<Form>;
-        using TrialFields = typename Analysis::trial_fields;
-        using TestFields  = typename Analysis::test_fields;
-        using Velocity    = typename internal::TypeListAt<0, TrialFields>::type;
-        using Pressure    = typename internal::TypeListAt<1, TrialFields>::type;
-        using TestVelocity = typename internal::TypeListAt<0, TestFields>::type;
-        using TestPressure = typename internal::TypeListAt<1, TestFields>::type;
-
-      public:
-        StokesQuadratureKernel(Form form)
-          : form(std::move(form))
-        {
-          static_assert(
-            Analysis::n_trial_fields == 2 && Analysis::n_test_fields == 2,
-            "the Stokes kernel expects two trial and two test fields");
-          static_assert(
-            Velocity::shape == ValueShape::vector &&
-              TestVelocity::shape == ValueShape::vector &&
-              Pressure::shape == ValueShape::scalar &&
-              TestPressure::shape == ValueShape::scalar,
-            "Stokes fields must be vector velocity and scalar pressure");
-          static_assert(Velocity::index == 0 && TestVelocity::index == 0 &&
-                          Pressure::index == 1 && TestPressure::index == 1,
-                        "the Stokes kernel expects velocity at index 0 and "
-                        "pressure at index 1");
-          static_assert(
-            Analysis::n_coefficients == 1,
-            "the current Stokes kernel expects one viscosity symbol");
-          static_assert(
-            internal::FieldRequirements<Form, Velocity>::gradient &&
-              internal::FieldRequirements<Form, Pressure>::value &&
-              internal::FieldRequirements<Form, TestVelocity>::gradient &&
-              internal::FieldRequirements<Form, TestPressure>::value,
-            "Stokes evaluations must be derived as u:gradient, p:value, "
-            "v:gradient, q:value");
-        }
-
-        template <typename VelocityEvaluation, typename PressureEvaluation>
-        DEAL_II_HOST_DEVICE void
-        operator()(VelocityEvaluation &velocity_phi,
-                   PressureEvaluation &pressure_phi,
-                   const unsigned int  q) const
-        {
-          const auto velocity_gradient = velocity_phi.get_gradient(q);
-          using Number =
-            typename std::decay<decltype(velocity_gradient[0][0])>::type;
-
-          const Number mu =
-            static_cast<Number>(internal::single_coefficient_value(form));
-          const auto symmetric_gradient =
-            Number(0.5) * (velocity_gradient + transpose(velocity_gradient));
-          dealii::Tensor<2, dim, Number> stress =
-            (Number(2) * mu) * symmetric_gradient;
-          const Number pressure   = pressure_phi.get_value(q);
-          const Number divergence = trace(velocity_gradient);
-          for (unsigned int d = 0; d < dim; ++d)
-            stress[d][d] -= pressure;
-
-          velocity_phi.submit_gradient(stress, q);
-          pressure_phi.submit_value(-divergence, q);
-        }
-
-        /**
-         * @brief Apply the velocity diagonal block at one quadrature point.
-         * @param velocity_phi The velocity evaluation with evaluated gradients.
-         * @param point The quadrature-point index.
-         */
-        template <typename VelocityEvaluation>
-        DEAL_II_HOST_DEVICE void
-        operator()(VelocityEvaluation &velocity_phi,
-                   const unsigned int  point) const
-        {
-          const auto gradient = velocity_phi.get_gradient(point);
-          using Number        = std::decay_t<decltype(gradient[0][0])>;
-          const Number viscosity =
-            Number(internal::single_coefficient_value(form));
-          velocity_phi.submit_gradient(viscosity *
-                                         (gradient + transpose(gradient)),
-                                       point);
-        }
-
-      private:
-        Form form;
-      };
 
       /**
-       * @brief Apply a static isotropic-elasticity form with CPU MatrixFree.
-       *
-       * The form expression type selects the quadrature operations at compile
-       * time. This first lowering supports the canonical isotropic-elasticity
-       * expression with constant Lamé parameters. The quadrature kernel is
-       * shared with the Portable::MatrixFree implementation below.
+       * @brief CPU MatrixFree application of a statically lowered bilinear cell form.
+       * @tparam dim Spatial dimension (two or three).
+       * @tparam fe_degree Common polynomial degree of all fields.
+       * @tparam Form The owned cell-form expression type.
+       * @tparam Number Scalar number type.
+       * @tparam VectorType Distributed vector, or block vector for multiple fields.
+       * Fields use matching trial/test indices and one DoFHandler per field.
        */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Number = double,
-                typename VectorType =
-                  dealii::LinearAlgebra::distributed::Vector<Number>>
-      class MatrixFreeFormOperator
-        : public dealii::MatrixFreeOperators::Base<dim, VectorType>
+                typename Number,
+                typename VectorType>
+      class MatrixFreeCellOperator
+        : public dealii::MatrixFreeOperators::Base<dim, VectorType>,
+          private internal::
+            ValidateFields<Form, typename FormFields<Form>::trial_fields>
       {
+        static_assert(dim == 2 || dim == 3,
+                      "cell lowering supports dimensions two and three");
+        using Fields = typename FormFields<Form>::trial_fields;
+
       public:
         using Data   = dealii::MatrixFree<dim, Number>;
         using Vector = VectorType;
 
-        MatrixFreeFormOperator(std::shared_ptr<const Data> data, Form form)
+        /** @brief Initialize an operator. @param data Initialized field data. @param form Cell form to store. */
+        MatrixFreeCellOperator(std::shared_ptr<const Data> data, Form form)
           : kernel(std::move(form))
         {
           this->initialize(std::move(data));
         }
 
-        /**
-         * @brief Return the diagonal, computing and caching it on first use.
-         * @return The owned diagonal vector (not its inverse).
-         * Constrained entries are one. The first call is collective over the
-         * operator's MPI communicator; all ranks must call it consistently.
-         * The reference remains valid until recomputation or destruction.
-         */
-        const VectorType &
-        get_diagonal() const
-        {
-          if (!cached_diagonal)
-            cached_diagonal = build_diagonal();
-          return cached_diagonal->get_vector();
-        }
-
-        /**
-         * @brief Recompute the diagonal, replacing any cached values.
-         * This collective operation invalidates earlier diagonal references.
-         */
-        void
-        compute_diagonal() override
-        {
-          cached_diagonal        = build_diagonal();
-          this->diagonal_entries = cached_diagonal;
-        }
-
-      private:
-        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-        build_diagonal() const
-        {
-          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-          auto &diagonal = result->get_vector();
-          internal::compute_diagonal<dim, fe_degree, dim>(
-            *this->data, diagonal, kernel, dealii::EvaluationFlags::gradients);
-          return result;
-        }
-
-        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal;
-
-        void
-        apply_add(VectorType       &destination,
-                  const VectorType &source) const override
-        {
-          this->data->cell_loop(&MatrixFreeFormOperator::local_apply,
-                                this,
-                                destination,
-                                source);
-        }
-
-        void
-        local_apply(
-          const Data                                  &matrix_free_data,
-          VectorType                                  &destination,
-          const VectorType                            &source,
-          const std::pair<unsigned int, unsigned int> &cell_range) const
-        {
-          dealii::FEEvaluation<dim, fe_degree, fe_degree + 1, dim, Number> phi(
-            matrix_free_data, 0);
-          for (unsigned int cell = cell_range.first; cell < cell_range.second;
-               ++cell)
-            {
-              phi.reinit(cell);
-              phi.read_dof_values(source);
-              phi.evaluate(dealii::EvaluationFlags::gradients);
-              for (unsigned int q = 0; q < phi.n_q_points; ++q)
-                kernel(phi, q);
-              phi.integrate(dealii::EvaluationFlags::gradients);
-              phi.distribute_local_to_global(destination);
-            }
-        }
-
-        ElasticityQuadratureKernel<Form> kernel;
-      };
-
-      /**
-       * @brief Apply the same static isotropic-elasticity form with
-       * Portable::MatrixFree.
-       */
-      template <int dim,
-                int fe_degree,
-                typename Form,
-                typename Number     = double,
-                typename VectorType = dealii::LinearAlgebra::distributed::
-                  Vector<Number, dealii::MemorySpace::Default>>
-      class PortableMatrixFreeFormOperator
-      {
-      public:
-        using Data   = dealii::Portable::MatrixFree<dim, Number>;
-        using Vector = VectorType;
-
-        PortableMatrixFreeFormOperator(std::shared_ptr<Data> data, Form form)
-          : data(std::move(data))
-          , cell_operation{ElasticityQuadratureKernel<Form>(std::move(form))}
-        {}
-
-        void
-        initialize_dof_vector(VectorType &vector) const
-        {
-          data->initialize_dof_vector(vector, 0);
-        }
-
-        void
-        vmult(VectorType &destination, const VectorType &source) const
-        {
-          destination = Number();
-          data->cell_loop(cell_operation, source, destination);
-          data->copy_constrained_values(source, destination, 0);
-        }
-
-        /**
-         * @brief Return the diagonal, computing and caching it on first use.
-         * @return The owned diagonal vector (not its inverse).
-         * Constrained entries are one. The first call is collective over the
-         * operator's MPI communicator; all ranks must call it consistently.
-         * The reference remains valid until recomputation or destruction.
-         */
-        const VectorType &
-        get_diagonal() const
-        {
-          if (!cached_diagonal)
-            cached_diagonal = build_diagonal();
-          return cached_diagonal->get_vector();
-        }
-
-        /**
-         * @brief Recompute the diagonal, replacing any cached values.
-         * This collective operation invalidates earlier diagonal references.
-         */
-        void
-        compute_diagonal()
-        {
-          cached_diagonal = build_diagonal();
-        }
-
-      private:
-        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-        build_diagonal() const
-        {
-          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-          auto &diagonal = result->get_vector();
-          internal::compute_diagonal<dim, fe_degree, dim>(
-            *data,
-            diagonal,
-            cell_operation.kernel,
-            dealii::EvaluationFlags::gradients);
-          return result;
-        }
-
-        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal;
-
-        struct CellOperation
-        {
-          static constexpr unsigned int n_q_points =
-            dealii::Utilities::pow(fe_degree + 1, dim);
-
-          ElasticityQuadratureKernel<Form> kernel;
-
-          DEAL_II_HOST_DEVICE void
-          operator()(const typename Data::Data                    *cell_data,
-                     const dealii::Portable::DeviceVector<Number> &source,
-                     dealii::Portable::DeviceVector<Number> &destination) const
-          {
-            dealii::Portable::
-              FEEvaluation<dim, fe_degree, fe_degree + 1, dim, Number>
-                phi(cell_data, 0);
-            phi.read_dof_values(source);
-            phi.evaluate(dealii::EvaluationFlags::gradients);
-            for (unsigned int q = 0; q < phi.n_q_points; ++q)
-              kernel(phi, q);
-            phi.integrate(dealii::EvaluationFlags::gradients);
-            phi.distribute_local_to_global(destination);
-          }
-        };
-
-        std::shared_ptr<Data> data;
-        CellOperation         cell_operation;
-      };
-
-      /** @brief MatrixFree operator for scalar gradient inner-product forms. */
-      template <int dim,
-                int fe_degree,
-                typename Form,
-                typename Number = double,
-                typename VectorType =
-                  dealii::LinearAlgebra::distributed::Vector<Number>>
-      class MatrixFreeScalarFormOperator
-        : public dealii::MatrixFreeOperators::Base<dim, VectorType>
-      {
-      public:
-        using Data   = dealii::MatrixFree<dim, Number>;
-        using Vector = VectorType;
-
-        MatrixFreeScalarFormOperator(std::shared_ptr<const Data> data,
-                                     Form                        form)
-          : kernel(std::move(form))
-        {
-          this->initialize(std::move(data));
-        }
-
-        /**
-         * @brief Return the diagonal, computing and caching it on first use.
-         * @return The owned diagonal vector (not its inverse).
-         * Constrained entries are one. The first call is collective over the
-         * operator's MPI communicator; all ranks must call it consistently.
-         * The reference remains valid until recomputation or destruction.
-         */
-        const VectorType &
-        get_diagonal() const
-        {
-          if (!cached_diagonal)
-            cached_diagonal = build_diagonal();
-          return cached_diagonal->get_vector();
-        }
-
-        /**
-         * @brief Recompute the diagonal, replacing any cached values.
-         * This collective operation invalidates earlier diagonal references.
-         */
-        void
-        compute_diagonal() override
-        {
-          cached_inverse_diagonal.reset();
-          cached_diagonal        = build_diagonal();
-          this->diagonal_entries = cached_diagonal;
-        }
-
-        /**
-         * @brief Return the inverse diagonal, computing and caching it on first use.
-         * @return The owned vector of reciprocal diagonal entries.
-         * @pre All locally owned diagonal entries are nonzero.
-         * The first call is collective over the operator's MPI communicator.
-         * The reference remains valid until compute_diagonal() or destruction.
-         */
-        const VectorType &
-        get_inverse_diagonal() const
-        {
-          if (!cached_inverse_diagonal)
-            {
-              const auto &diagonal = get_diagonal();
-              auto        result =
-                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-              auto &inverse = result->get_vector();
-              inverse.reinit(diagonal);
-              for (unsigned int index = 0; index < inverse.locally_owned_size();
-                   ++index)
-                inverse.local_element(index) =
-                  Number(1) / diagonal.local_element(index);
-              cached_inverse_diagonal = std::move(result);
-            }
-          return cached_inverse_diagonal->get_vector();
-        }
-
-        /**
-         * @brief Apply weighted Jacobi using the lazily computed inverse diagonal.
-         * @param dst The initialized destination vector.
-         * @param src The source vector with matching partitioning.
-         * @param omega The relaxation factor.
-         * @pre All locally owned diagonal entries are nonzero.
-         */
-        void
-        precondition_Jacobi(VectorType       &dst,
-                            const VectorType &src,
-                            const Number      omega = Number(1)) const
-        {
-          const auto &inverse = get_inverse_diagonal();
-          dst                 = src;
-          dst.scale(inverse);
-          dst *= omega;
-        }
-
-      private:
-        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-        build_diagonal() const
-        {
-          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-          auto &diagonal = result->get_vector();
-          internal::compute_diagonal<dim, fe_degree, 1>(
-            *this->data,
-            diagonal,
-            kernel,
-            dealii::EvaluationFlags::values |
-              dealii::EvaluationFlags::gradients);
-          return result;
-        }
-
-        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal, cached_inverse_diagonal;
-
-        void
-        apply_add(VectorType &dst, const VectorType &src) const override
-        {
-          this->data->cell_loop(&MatrixFreeScalarFormOperator::local_apply,
-                                this,
-                                dst,
-                                src);
-        }
-
-        void
-        local_apply(const Data                                  &mf,
-                    VectorType                                  &dst,
-                    const VectorType                            &src,
-                    const std::pair<unsigned int, unsigned int> &range) const
-        {
-          dealii::FEEvaluation<dim, fe_degree, fe_degree + 1, 1> phi(mf, 0);
-          for (unsigned int cell = range.first; cell < range.second; ++cell)
-            {
-              phi.reinit(cell);
-              phi.read_dof_values(src);
-              phi.evaluate(dealii::EvaluationFlags::values |
-                           dealii::EvaluationFlags::gradients);
-              for (unsigned int q = 0; q < phi.n_q_points; ++q)
-                kernel(phi, q);
-              phi.integrate(dealii::EvaluationFlags::values |
-                            dealii::EvaluationFlags::gradients);
-              phi.distribute_local_to_global(dst);
-            }
-        }
-
-        internal::ScalarLaplaceQuadratureKernel<dim, Form> kernel;
-      };
-
-      /** @brief Portable::MatrixFree operator for scalar gradient forms. */
-      template <int dim,
-                int fe_degree,
-                typename Form,
-                typename Number     = double,
-                typename VectorType = dealii::LinearAlgebra::distributed::
-                  Vector<Number, dealii::MemorySpace::Default>>
-      class PortableMatrixFreeScalarFormOperator
-        : public dealii::EnableObserverPointer
-      {
-      public:
-        using Data   = dealii::Portable::MatrixFree<dim, Number>;
-        using Vector = VectorType;
-
-        PortableMatrixFreeScalarFormOperator(std::shared_ptr<Data> data,
-                                             Form                  form)
-          : data(std::move(data))
-          , cell_operation{internal::ScalarLaplaceQuadratureKernel<dim, Form>(
-              std::move(form))}
-        {}
-
-        void
-        initialize_dof_vector(VectorType &vector) const
-        {
-          data->initialize_dof_vector(vector, 0);
-        }
-
-        void
-        vmult(VectorType &dst, const VectorType &src) const
-        {
-          dst = Number();
-          data->cell_loop(cell_operation, src, dst);
-          data->copy_constrained_values(src, dst, 0);
-        }
-
-        /**
-         * @brief Return the diagonal, computing and caching it on first use.
-         * @return The owned diagonal vector (not its inverse).
-         * Constrained entries are one. The first call is collective over the
-         * operator's MPI communicator; all ranks must call it consistently.
-         * The reference remains valid until recomputation or destruction.
-         */
-        const VectorType &
-        get_diagonal() const
-        {
-          if (!cached_diagonal)
-            cached_diagonal = build_diagonal();
-          return cached_diagonal->get_vector();
-        }
-
-        /**
-         * @brief Recompute the diagonal, replacing any cached values.
-         * This collective operation invalidates earlier diagonal references.
-         */
-        void
-        compute_diagonal()
-        {
-          cached_inverse_diagonal.reset();
-          cached_diagonal = build_diagonal();
-        }
-
-        /**
-         * @brief Return the inverse diagonal, computing and caching it on first use.
-         * @return The owned vector of reciprocal diagonal entries.
-         * @pre All locally owned diagonal entries are nonzero.
-         * The first call is collective over the operator's MPI communicator.
-         * The reference remains valid until compute_diagonal() or destruction.
-         */
-        const VectorType &
-        get_inverse_diagonal() const
-        {
-          if (!cached_inverse_diagonal)
-            {
-              const auto &diagonal = get_diagonal();
-              auto        result =
-                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-              auto &inverse = result->get_vector();
-              inverse.reinit(diagonal);
-              using ExecutionSpace = typename VectorType::memory_space::
-                kokkos_space::execution_space;
-              auto       *entries          = inverse.get_values();
-              const auto *diagonal_entries = diagonal.get_values();
-              Kokkos::parallel_for(
-                "pmf inverse diagonal",
-                Kokkos::RangePolicy<ExecutionSpace>(
-                  0, inverse.locally_owned_size()),
-                KOKKOS_LAMBDA(const unsigned int index) {
-                  entries[index] = Number(1) / diagonal_entries[index];
-                });
-              ExecutionSpace().fence();
-              cached_inverse_diagonal = std::move(result);
-            }
-          return cached_inverse_diagonal->get_vector();
-        }
-
-        /**
-         * @brief Apply weighted Jacobi using the lazily computed inverse diagonal.
-         * @param dst The initialized destination vector.
-         * @param src The source vector with matching partitioning.
-         * @param omega The relaxation factor.
-         * @pre All locally owned diagonal entries are nonzero.
-         */
-        void
-        precondition_Jacobi(VectorType       &dst,
-                            const VectorType &src,
-                            const Number      omega = Number(1)) const
-        {
-          const auto &inverse = get_inverse_diagonal();
-          dst                 = src;
-          dst.scale(inverse);
-          dst *= omega;
-        }
-
-      private:
-        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-        build_diagonal() const
-        {
-          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-          auto &diagonal = result->get_vector();
-          internal::compute_diagonal<dim, fe_degree, 1>(
-            *data,
-            diagonal,
-            cell_operation.kernel,
-            dealii::EvaluationFlags::values |
-              dealii::EvaluationFlags::gradients);
-          return result;
-        }
-
-        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal, cached_inverse_diagonal;
-
-        struct CellOperation
-        {
-          static constexpr unsigned int n_q_points =
-            dealii::Utilities::pow(fe_degree + 1, dim);
-          internal::ScalarLaplaceQuadratureKernel<dim, Form> kernel;
-
-          DEAL_II_HOST_DEVICE void
-          operator()(const typename Data::Data                    *cell_data,
-                     const dealii::Portable::DeviceVector<Number> &src,
-                     dealii::Portable::DeviceVector<Number>       &dst) const
-          {
-            dealii::Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, 1>
-              phi(cell_data, 0);
-            phi.read_dof_values(src);
-            phi.evaluate(dealii::EvaluationFlags::values |
-                         dealii::EvaluationFlags::gradients);
-            for (unsigned int q = 0; q < phi.n_q_points; ++q)
-              kernel(phi, q);
-            phi.integrate(dealii::EvaluationFlags::values |
-                          dealii::EvaluationFlags::gradients);
-            phi.distribute_local_to_global(dst);
-          }
-        };
-
-        std::shared_ptr<Data> data;
-        CellOperation         cell_operation;
-      };
-
-      /** @brief MatrixFree operator for the two-field Stokes form. */
-      template <int dim,
-                int fe_degree,
-                typename Form,
-                typename Number = double,
-                typename VectorType =
-                  dealii::LinearAlgebra::distributed::BlockVector<Number>>
-      class MatrixFreeStokesOperator
-        : public dealii::MatrixFreeOperators::Base<dim, VectorType>
-      {
-      public:
-        using Data   = dealii::MatrixFree<dim, Number>;
-        using Vector = VectorType;
-        using Kernel = StokesQuadratureKernel<dim, Form>;
-
-        MatrixFreeStokesOperator(std::shared_ptr<const Data> data, Form form)
-          : kernel(std::move(form))
-        {
-          this->initialize(std::move(data));
-        }
-
+        /** @brief Initialize a distributed vector with the field partitioning. @param vector Vector to initialize. */
         void
         initialize_dof_vector(VectorType &vector) const
         {
@@ -1440,116 +475,162 @@ namespace pmf
         }
 
         /**
-         * @brief Return the diagonal, computing and caching it on first use.
-         * @return The owned diagonal vector (not its inverse).
-         * Constrained entries are one. The first call is collective over the
-         * operator's MPI communicator; all ranks must call it consistently.
-         * The reference remains valid until recomputation or destruction.
+         * @brief Return the lazily cached diagonal, with constrained entries set to one.
+         * @return The owned diagonal vector; ghost values are not updated.
+         * The first call is collective. References expire at recomputation or
+         * destruction.
          */
         const VectorType &
         get_diagonal() const
         {
           if (!cached_diagonal)
-            cached_diagonal = build_diagonal();
+            {
+              auto result =
+                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+              internal::compute_diagonal<dim, fe_degree>(*this->data,
+                                                         result->get_vector(),
+                                                         kernel,
+                                                         Fields{});
+              cached_diagonal = std::move(result);
+            }
           return cached_diagonal->get_vector();
         }
 
-        /**
-         * @brief Recompute the diagonal, replacing any cached values.
-         * This collective operation invalidates earlier diagonal references.
-         */
+        /** @brief Collectively recompute the diagonal and invalidate both caches' references. */
         void
         compute_diagonal() override
         {
-          cached_diagonal        = build_diagonal();
+          cached_inverse_diagonal.reset();
+          cached_diagonal.reset();
+          get_diagonal();
           this->diagonal_entries = cached_diagonal;
         }
 
+        /**
+         * @brief Return the lazily cached reciprocal diagonal.
+         * @return Owned reciprocal entries; ghost values are not updated.
+         * @pre Every locally owned diagonal entry must be nonzero.
+         * The first call is collective. References expire at recomputation or
+         * destruction.
+         */
+        const VectorType &
+        get_inverse_diagonal() const
+        {
+          if (!cached_inverse_diagonal)
+            {
+              const auto &diagonal = get_diagonal();
+              auto        result =
+                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+              auto &inverse = result->get_vector();
+              inverse.reinit(diagonal);
+              internal::invert_diagonal(inverse, diagonal);
+              cached_inverse_diagonal = std::move(result);
+            }
+          return cached_inverse_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Apply weighted Jacobi using the cached inverse diagonal.
+         * @param dst Initialized destination. @param src Source with matching partitioning.
+         * @param omega Relaxation factor. @pre Diagonal entries must be nonzero.
+         */
+        void
+        precondition_Jacobi(VectorType       &dst,
+                            const VectorType &src,
+                            const Number      omega = Number(1)) const
+        {
+          const auto &inverse = get_inverse_diagonal();
+          dst                 = src;
+          dst.scale(inverse);
+          dst *= omega;
+        }
+
       private:
-        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-        build_diagonal() const
-        {
-          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-          auto &diagonal = result->get_vector();
-          initialize_dof_vector(diagonal);
-          diagonal = Number();
-          internal::compute_diagonal<dim, fe_degree, dim>(
-            *this->data,
-            diagonal.block(0),
-            kernel,
-            dealii::EvaluationFlags::gradients);
-          for (const auto index : this->data->get_constrained_dofs(1))
-            diagonal.block(1).local_element(index) = Number(1);
-          return result;
-        }
-
-        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal;
-
         void
-        apply_add(VectorType &dst, const VectorType &src) const override
+        apply_add(VectorType       &destination,
+                  const VectorType &source) const override
         {
-          this->data->cell_loop(&MatrixFreeStokesOperator::local_apply,
+          this->data->cell_loop(&MatrixFreeCellOperator::local_apply,
                                 this,
-                                dst,
-                                src);
+                                destination,
+                                source);
         }
 
         void
-        local_apply(const Data                                  &mf,
-                    VectorType                                  &dst,
-                    const VectorType                            &src,
+        local_apply(const Data                                  &data,
+                    VectorType                                  &destination,
+                    const VectorType                            &source,
                     const std::pair<unsigned int, unsigned int> &range) const
         {
-          dealii::FEEvaluation<dim, fe_degree, fe_degree + 1, dim> velocity_phi(
-            mf, 0);
-          dealii::FEEvaluation<dim, fe_degree, fe_degree + 1, 1> pressure_phi(
-            mf, 1);
+          internal::EvaluationPack<
+            dim,
+            Form,
+            internal::CpuEvaluation<dim, fe_degree, Number>::template type,
+            Fields>
+            evaluations(data);
           for (unsigned int cell = range.first; cell < range.second; ++cell)
             {
-              velocity_phi.reinit(cell);
-              pressure_phi.reinit(cell);
-              velocity_phi.read_dof_values(src, 0);
-              pressure_phi.read_dof_values(src, 1);
-              velocity_phi.evaluate(dealii::EvaluationFlags::gradients);
-              pressure_phi.evaluate(dealii::EvaluationFlags::values);
-              for (unsigned int q = 0; q < velocity_phi.n_q_points; ++q)
-                kernel(velocity_phi, pressure_phi, q);
-              velocity_phi.integrate(dealii::EvaluationFlags::gradients);
-              pressure_phi.integrate(dealii::EvaluationFlags::values);
-              velocity_phi.distribute_local_to_global(dst, 0);
-              pressure_phi.distribute_local_to_global(dst, 1);
+              evaluations.reinit(cell);
+              evaluations.read(source);
+              for (unsigned int point = 0;
+                   point < dealii::Utilities::pow(fe_degree + 1, dim);
+                   ++point)
+                {
+                  evaluations.point = point;
+                  evaluations.clear();
+                  kernel(evaluations);
+                  evaluations.submit();
+                }
+              evaluations.scatter(destination);
             }
         }
 
-        Kernel kernel;
+        BilinearCellKernel<Form> kernel;
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal, cached_inverse_diagonal;
       };
 
-      /** @brief Portable::MatrixFree operator for the two-field Stokes form. */
+      /**
+       * @brief Portable MatrixFree application using the same bilinear cell lowering.
+       * @tparam dim Spatial dimension (two or three).
+       * @tparam fe_degree Common polynomial degree of all fields.
+       * @tparam Form The owned cell-form expression type.
+       * @tparam Number Scalar number type.
+       * @tparam VectorType Distributed vector, or block vector for multiple fields.
+       * Fields use matching trial/test indices and one DoFHandler per field.
+       */
       template <int dim,
                 int fe_degree,
                 typename Form,
-                typename Number     = double,
-                typename VectorType = dealii::LinearAlgebra::distributed::
-                  BlockVector<Number, dealii::MemorySpace::Default>>
-      class PortableMatrixFreeStokesOperator
+                typename Number,
+                typename VectorType>
+      class PortableMatrixFreeCellOperator
+        : public dealii::EnableObserverPointer,
+          private internal::
+            ValidateFields<Form, typename FormFields<Form>::trial_fields>
       {
+        static_assert(dim == 2 || dim == 3,
+                      "cell lowering supports dimensions two and three");
+        using Fields = typename FormFields<Form>::trial_fields;
+
       public:
         using Data   = dealii::Portable::MatrixFree<dim, Number>;
         using Vector = VectorType;
-        using Kernel = StokesQuadratureKernel<dim, Form>;
 
-        PortableMatrixFreeStokesOperator(std::shared_ptr<Data> data, Form form)
+        /** @brief Initialize an operator. @param data Initialized field data. @param form Cell form to store. */
+        PortableMatrixFreeCellOperator(std::shared_ptr<Data> data, Form form)
           : data(std::move(data))
-          , cell_operation{Kernel(std::move(form))}
+          , cell_operation{BilinearCellKernel<Form>(std::move(form))}
         {}
 
+        /** @brief Initialize a distributed vector with the field partitioning. @param vector Vector to initialize. */
         void
         initialize_dof_vector(VectorType &vector) const
         {
           data->initialize_dof_vector(vector);
         }
 
+        /** @brief Apply the form. @param dst Initialized destination. @param src Source with matching partitioning. */
         void
         vmult(VectorType &dst, const VectorType &src) const
         {
@@ -1559,214 +640,152 @@ namespace pmf
         }
 
         /**
-         * @brief Return the diagonal, computing and caching it on first use.
-         * @return The owned diagonal vector (not its inverse).
-         * Constrained entries are one. The first call is collective over the
-         * operator's MPI communicator; all ranks must call it consistently.
-         * The reference remains valid until recomputation or destruction.
+         * @brief Return the lazily cached diagonal, with constrained entries set to one.
+         * @return The owned diagonal vector; ghost values are not updated.
+         * The first call is collective. References expire at recomputation or
+         * destruction.
          */
         const VectorType &
         get_diagonal() const
         {
           if (!cached_diagonal)
-            cached_diagonal = build_diagonal();
+            {
+              auto result =
+                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+              internal::compute_diagonal<dim, fe_degree>(*data,
+                                                         result->get_vector(),
+                                                         cell_operation.kernel,
+                                                         Fields{});
+              cached_diagonal = std::move(result);
+            }
           return cached_diagonal->get_vector();
         }
 
-        /**
-         * @brief Recompute the diagonal, replacing any cached values.
-         * This collective operation invalidates earlier diagonal references.
-         */
+        /** @brief Collectively recompute the diagonal and invalidate both caches' references. */
         void
         compute_diagonal()
         {
-          cached_diagonal = build_diagonal();
+          cached_inverse_diagonal.reset();
+          cached_diagonal.reset();
+          get_diagonal();
+        }
+
+        /**
+         * @brief Return the lazily cached reciprocal diagonal.
+         * @return Owned reciprocal entries; ghost values are not updated.
+         * @pre Every locally owned diagonal entry must be nonzero.
+         * The first call is collective. References expire at recomputation or
+         * destruction.
+         */
+        const VectorType &
+        get_inverse_diagonal() const
+        {
+          if (!cached_inverse_diagonal)
+            {
+              const auto &diagonal = get_diagonal();
+              auto        result =
+                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+              auto &inverse = result->get_vector();
+              inverse.reinit(diagonal);
+              internal::invert_diagonal(inverse, diagonal);
+              cached_inverse_diagonal = std::move(result);
+            }
+          return cached_inverse_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Apply weighted Jacobi using the cached inverse diagonal.
+         * @param dst Initialized destination. @param src Source with matching partitioning.
+         * @param omega Relaxation factor. @pre Diagonal entries must be nonzero.
+         */
+        void
+        precondition_Jacobi(VectorType       &dst,
+                            const VectorType &src,
+                            const Number      omega = Number(1)) const
+        {
+          const auto &inverse = get_inverse_diagonal();
+          dst                 = src;
+          dst.scale(inverse);
+          dst *= omega;
         }
 
       private:
-        std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-        build_diagonal() const
-        {
-          auto  result = std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-          auto &diagonal = result->get_vector();
-          initialize_dof_vector(diagonal);
-          diagonal = Number();
-          internal::compute_diagonal<dim, fe_degree, dim>(
-            *data,
-            diagonal.block(0),
-            cell_operation.kernel,
-            dealii::EvaluationFlags::gradients);
-          data->set_constrained_values(Number(1), diagonal.block(1), 1);
-          return result;
-        }
-
-        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal;
-
         struct CellOperation
         {
           static constexpr unsigned int n_q_points =
             dealii::Utilities::pow(fe_degree + 1, dim);
-          Kernel kernel;
+          BilinearCellKernel<Form> kernel;
 
+          template <typename DeviceVector>
           DEAL_II_HOST_DEVICE void
           operator()(const typename Data::Data *cell_data,
-                     const dealii::Portable::DeviceBlockVector<Number> &src,
-                     dealii::Portable::DeviceBlockVector<Number> &dst) const
+                     const DeviceVector        &source,
+                     DeviceVector              &destination) const
           {
-            dealii::Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, dim>
-              velocity_phi(cell_data, 0);
-            dealii::Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, 1>
-              pressure_phi(cell_data, 1);
-            velocity_phi.read_dof_values(src.block(0));
-            pressure_phi.read_dof_values(src.block(1));
-            velocity_phi.evaluate(dealii::EvaluationFlags::gradients);
-            pressure_phi.evaluate(dealii::EvaluationFlags::values);
-            for (unsigned int q = 0; q < velocity_phi.n_q_points; ++q)
-              kernel(velocity_phi, pressure_phi, q);
-            velocity_phi.integrate(dealii::EvaluationFlags::gradients);
-            pressure_phi.integrate(dealii::EvaluationFlags::values);
-            velocity_phi.distribute_local_to_global(dst.block(0));
-            pressure_phi.distribute_local_to_global(dst.block(1));
+            internal::EvaluationPack<
+              dim,
+              Form,
+              internal::PortableEvaluation<dim, fe_degree, Number>::
+                template type,
+              Fields>
+              evaluations(cell_data);
+            evaluations.read(source);
+            for (unsigned int point = 0; point < n_q_points; ++point)
+              {
+                evaluations.point = point;
+                evaluations.clear();
+                kernel(evaluations);
+                evaluations.submit();
+              }
+            evaluations.scatter(destination);
           }
         };
 
         std::shared_ptr<Data> data;
         CellOperation         cell_operation;
+        mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+          cached_diagonal, cached_inverse_diagonal;
       };
 
-      namespace internal
-      {
-        template <typename Expression>
-        struct FormFieldInfo
-        {
-          static constexpr bool       found = false;
-          static constexpr ValueShape shape = ValueShape::scalar;
-        };
-
-        template <unsigned int Index, ValueShape Shape>
-        struct FormFieldInfo<Trial<Index, Shape>>
-        {
-          static constexpr bool       found = true;
-          static constexpr ValueShape shape = Shape;
-        };
-
-        template <unsigned int Index, ValueShape Shape>
-        struct FormFieldInfo<Test<Index, Shape>>
-        {
-          static constexpr bool       found = true;
-          static constexpr ValueShape shape = Shape;
-        };
-
-        template <typename Expression>
-        struct FormFieldInfo<Gradient<Expression>> : FormFieldInfo<Expression>
-        {};
-        template <typename Expression>
-        struct FormFieldInfo<Divergence<Expression>> : FormFieldInfo<Expression>
-        {};
-        template <typename Expression>
-        struct FormFieldInfo<Symmetrize<Expression>> : FormFieldInfo<Expression>
-        {};
-
-#define PMF_FORM_FIELD_INFO_BINARY(Node)           \
-  template <typename Left, typename Right>         \
-  struct FormFieldInfo<Node<Left, Right>>          \
-    : std::conditional<FormFieldInfo<Left>::found, \
-                       FormFieldInfo<Left>,        \
-                       FormFieldInfo<Right>>::type \
-  {}
-
-        PMF_FORM_FIELD_INFO_BINARY(Add);
-        PMF_FORM_FIELD_INFO_BINARY(Subtract);
-        PMF_FORM_FIELD_INFO_BINARY(Multiply);
-        PMF_FORM_FIELD_INFO_BINARY(Inner);
-        PMF_FORM_FIELD_INFO_BINARY(FormSum);
-        PMF_FORM_FIELD_INFO_BINARY(FormDifference);
-#undef PMF_FORM_FIELD_INFO_BINARY
-
-        template <typename Expression>
-        struct FormFieldInfo<Integral<Expression>> : FormFieldInfo<Expression>
-        {};
-      } // namespace internal
-
-      /**
-       * @brief CPU MatrixFree operator selected from the form's field shape.
-       *
-       * Scalar forms use scalar FEEvaluation. Vector forms use dim components.
-       * Const and reference qualifiers on forms are ignored.
-       */
+      /** @brief CPU bilinear cell operator; form cv/ref qualifiers are ignored. */
       template <int dim,
                 int fe_degree,
                 typename Form,
                 typename Number     = double,
-                typename VectorType = typename std::conditional<
+                typename VectorType = std::conditional_t<
                   (FormFields<Form>::n_trial_fields > 1),
                   dealii::LinearAlgebra::distributed::BlockVector<Number>,
-                  dealii::LinearAlgebra::distributed::Vector<Number>>::type>
-      using MatrixFreeOperator = typename std::conditional<
-        (FormFields<Form>::n_trial_fields > 1),
-        MatrixFreeStokesOperator<dim,
-                                 fe_degree,
-                                 std::decay_t<Form>,
-                                 Number,
-                                 VectorType>,
-        typename std::conditional<
-          internal::FormFieldInfo<std::decay_t<Form>>::shape ==
-            ValueShape::scalar,
-          MatrixFreeScalarFormOperator<dim,
-                                       fe_degree,
-                                       std::decay_t<Form>,
-                                       Number,
-                                       VectorType>,
-          MatrixFreeFormOperator<dim,
-                                 fe_degree,
-                                 std::decay_t<Form>,
-                                 Number,
-                                 VectorType>>::type>::type;
+                  dealii::LinearAlgebra::distributed::Vector<Number>>>
+      using MatrixFreeOperator = MatrixFreeCellOperator<dim,
+                                                        fe_degree,
+                                                        std::decay_t<Form>,
+                                                        Number,
+                                                        VectorType>;
 
-      /**
-       * @brief Portable::MatrixFree operator selected from the form shape.
-       * Const and reference qualifiers on forms are ignored.
-       */
+      /** @brief Portable bilinear cell operator; form cv/ref qualifiers are ignored. */
       template <int dim,
                 int fe_degree,
                 typename Form,
                 typename Number     = double,
-                typename VectorType = typename std::conditional<
+                typename VectorType = std::conditional_t<
                   (FormFields<Form>::n_trial_fields > 1),
                   dealii::LinearAlgebra::distributed::
                     BlockVector<Number, dealii::MemorySpace::Default>,
                   dealii::LinearAlgebra::distributed::
-                    Vector<Number, dealii::MemorySpace::Default>>::type>
-      using PortableMatrixFreeOperator = typename std::conditional<
-        (FormFields<Form>::n_trial_fields > 1),
-        PortableMatrixFreeStokesOperator<dim,
-                                         fe_degree,
-                                         std::decay_t<Form>,
-                                         Number,
-                                         VectorType>,
-        typename std::conditional<
-          internal::FormFieldInfo<std::decay_t<Form>>::shape ==
-            ValueShape::scalar,
-          PortableMatrixFreeScalarFormOperator<dim,
-                                               fe_degree,
-                                               std::decay_t<Form>,
-                                               Number,
-                                               VectorType>,
-          PortableMatrixFreeFormOperator<dim,
-                                         fe_degree,
-                                         std::decay_t<Form>,
-                                         Number,
-                                         VectorType>>::type>::type;
+                    Vector<Number, dealii::MemorySpace::Default>>>
+      using PortableMatrixFreeOperator =
+        PortableMatrixFreeCellOperator<dim,
+                                       fe_degree,
+                                       std::decay_t<Form>,
+                                       Number,
+                                       VectorType>;
 
       /**
-       * @brief Create a CPU operator from a form with embedded coefficients.
-       * @tparam dim The spatial dimension.
-       * @tparam fe_degree The finite-element degree.
-       * @param data The MatrixFree data, which may be const.
-       * @param form The form expression, copied or moved into the operator.
-       * @return The operator selected from the form and data types.
-       * Const forms are accepted and stored as unqualified values.
+       * @brief Create a CPU operator from a bilinear cell form.
+       * @tparam dim Spatial dimension. @tparam fe_degree Common field degree.
+       * @param data Initialized MatrixFree data, which may be const.
+       * @param form Expression to store by value; const forms are accepted.
+       * @return An operator with statically selected field evaluations.
        */
       template <int dim, int fe_degree, typename Data, typename Form>
       auto
@@ -1780,13 +799,11 @@ namespace pmf
       }
 
       /**
-       * @brief Create a Portable operator from a form with embedded coefficients.
-       * @tparam dim The spatial dimension.
-       * @tparam fe_degree The finite-element degree.
-       * @param data The mutable Portable::MatrixFree data.
-       * @param form The form expression, copied or moved into the operator.
-       * @return The portable operator selected from the form and data types.
-       * Const forms are accepted and stored as unqualified values.
+       * @brief Create a Portable operator from a bilinear cell form.
+       * @tparam dim Spatial dimension. @tparam fe_degree Common field degree.
+       * @param data Initialized mutable Portable MatrixFree data.
+       * @param form Expression to store by value; const forms are accepted.
+       * @return An operator with statically selected field evaluations.
        */
       template <int dim, int fe_degree, typename Number, typename Form>
       auto
@@ -1798,7 +815,7 @@ namespace pmf
           std::move(data), std::move(form));
       }
 
-      /** @brief Backwards-compatible name for the form-driven CPU operator. */
+      /** @brief Alias for a CPU elasticity operator using generic cell lowering. */
       template <int dim,
                 int fe_degree,
                 typename Form,
@@ -1806,9 +823,9 @@ namespace pmf
                 typename VectorType =
                   dealii::LinearAlgebra::distributed::Vector<Number>>
       using MatrixFreeElasticityOperator =
-        MatrixFreeFormOperator<dim, fe_degree, Form, Number, VectorType>;
+        MatrixFreeOperator<dim, fe_degree, Form, Number, VectorType>;
 
-      /** @brief Backwards-compatible name for the Portable form operator. */
+      /** @brief Alias for a Portable elasticity operator using generic cell lowering. */
       template <int dim,
                 int fe_degree,
                 typename Form,
@@ -1816,13 +833,9 @@ namespace pmf
                 typename VectorType = dealii::LinearAlgebra::distributed::
                   Vector<Number, dealii::MemorySpace::Default>>
       using PortableMatrixFreeElasticityOperator =
-        PortableMatrixFreeFormOperator<dim,
-                                       fe_degree,
-                                       Form,
-                                       Number,
-                                       VectorType>;
+        PortableMatrixFreeOperator<dim, fe_degree, Form, Number, VectorType>;
     } // namespace expression_templates
   } // namespace forms
 } // namespace pmf
 
-#endif // PMF_FORM_ELASTICITY_MATRIX_FREE_H
+#endif

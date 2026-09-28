@@ -7,8 +7,10 @@ form can drive either `dealii::MatrixFree` with `FEEvaluation`, or
 
 The goal is to keep the mathematical expression independent of the execution
 backend. A form is passed to `make_matrix_free_operator` or
-`make_portable_matrix_free_operator`; the operator inspects the formal field
-shapes at compile time and selects scalar or vector evaluation.
+`make_portable_matrix_free_operator`. Both use the same compile-time lowering:
+trial fields supply values and gradients, and the expression's adjoint
+operations accumulate test-field values and gradients for submission.
+Field shapes and evaluation/integration flags are derived from the form.
 
 For a single-field form, `trial()` and `test()` use default scalar symbols;
 write `trial<ValueShape::vector>()` and `test<ValueShape::vector>()` for vector
@@ -61,10 +63,11 @@ MatrixFree data. Computation is collective over the operator's MPI communicator,
 so all ranks must call consistently. Constrained entries are one; unconstrained
 Stokes pressure entries are zero. Ghost entries are not updated.
 
-Scalar operators also provide `get_inverse_diagonal()`, which lazily caches
+Operators also provide `get_inverse_diagonal()`, which lazily caches
 the reciprocal diagonal for `PreconditionJacobi`. It requires nonzero diagonal
 entries and supports const operators on both backends. `compute_diagonal()`
-invalidates this cache as well. Ghost entries are not updated.
+invalidates this cache as well. Ghost entries are not updated. The unstabilized
+Stokes form has zero pressure diagonal entries and cannot use this inverse.
 
 ### Weighted Helmholtz
 
@@ -157,13 +160,21 @@ mpiexec -n 2 ./build/pmf_form_tests "[stokes]"
 
 ## Supported forms
 
-The implemented matrix-free subset is scalar Laplace and Helmholtz forms,
-including independent constant diffusion and reaction coefficients,
-the supported isotropic elasticity patterns, and a two-field Stokes form.
-The `coefficient(value)` factory accepts arithmetic constants and stores them
-by value. Spatially varying coefficient providers, general kernel lowering,
-assembled `FEValues` operators, and boundary and face terms are not supported.
-Mixed operators support the Stokes form above.
+The generic evaluator handles bilinear cell forms built from scalar/vector
+field values, field gradients and divergences, symmetrization, inner products,
+scalar multiplication, and sums/differences of expressions and integrals.
+Every term must be homogeneous of degree one in trial fields and one in test
+fields; nonlinear or affine terms are rejected at compile time. Coefficients
+and literals are arithmetic constants stored by value.
+
+Operators support two and three spatial dimensions, with one DoFHandler per
+field and a common polynomial degree and quadrature rule. Trial and test
+fields must have matching shapes and contiguous indices starting at zero.
+Multiple fields use distributed block vectors. Gradients and divergences
+apply directly to field symbols, not to composite expressions.
+
+Spatially varying coefficient providers, assembled `FEValues` operators, and
+boundary and face terms are not supported.
 See [plan.md](plan.md) for the roadmap and status.
 
 ## Build and test
@@ -206,6 +217,16 @@ forcing, checks convergence and the true residual, and compares the solutions wi
 
 ```sh
 mpiexec -n 2 ./build/pmf_form_tests "[laplace][solve]"
+```
+
+`tests/test_generic_lowering.cc` checks scalar Helmholtz, vector elasticity,
+and mixed Stokes actions and diagonals against independent `FEValues`
+integration on both backends. Variants exercise reordered operands, coefficient
+sums, different coupling signs, and additional mixed-system mass terms.
+Run these tests with:
+
+```sh
+mpiexec -n 2 ./build/pmf_form_tests "[lowering]"
 ```
 
 Catch2 is fetched by CMake into the build tree. Format project C++ files with:

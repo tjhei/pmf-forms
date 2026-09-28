@@ -3,9 +3,9 @@
 ## Current implementation status
 
 The current prototype uses C++ expression templates and has CPU and Portable
-MatrixFree operators for a limited set of scalar and vector forms. The public
-`MatrixFreeOperator` and `PortableMatrixFreeOperator` aliases infer scalar or
-vector evaluation from the formal test/trial field shapes.
+MatrixFree operators for bilinear scalar, vector, and mixed cell forms. The
+public `MatrixFreeOperator` and `PortableMatrixFreeOperator` aliases derive
+field evaluations and submissions through shared compile-time lowering.
 
 Implemented and build-checked:
 
@@ -33,16 +33,21 @@ Implemented and build-checked:
   and block vectors on CPU and Portable MatrixFree, with MPI unit tests for
   backend agreement and an interpolated manufactured solution.
 - Catch2 unit and backend comparison cases.
+- Generic recursive trial evaluation and adjoint test submission for cell
+  forms, including expression-derived per-field flags and diagonal blocks.
+- Independent FEValues action and diagonal checks for scalar Helmholtz,
+  vector elasticity, and mixed Stokes, including algebraic rearrangements
+  and mixed forms with changed coupling signs and additional mass terms.
+- Compile-time checks for bilinearity, matching trial/test shapes, and
+  contiguous field indices.
 
 Still incomplete:
 
 - Variable coefficient fields and general coefficient binding to FE data.
-- A general form-to-kernel lowering system; current backend visitors support
-  selected expression patterns.
-- General mixed-system lowering beyond the current two-field Stokes pattern.
+- Differential operators on composite expressions and heterogeneous field
+  degrees/quadrature rules.
 - `FEValues` assembly from the same form.
-- General validation of form arity, linearity, field shape consistency, and
-  backend capabilities.
+- Validation of backend capabilities beyond the supported cell-form subset.
 - GPU hardware validation and performance comparison against hand-written
   kernels.
 
@@ -871,11 +876,13 @@ multilinearity checking
 
 Invalid expressions should produce useful diagnostics.
 
-### Milestone 3: Kernel lowering — partial
+### Milestone 3: Kernel lowering — implemented for bilinear cell forms
 
-Selected scalar Laplace/Helmholtz and isotropic elasticity patterns lower
-through compile-time visitors into quadrature operations. There is not yet a
-general backend-neutral kernel IR, and Stokes is not lowered.
+A shared recursive evaluator lowers trial-field expressions and propagates
+adjoints to test-field value/gradient submissions. Scalar Helmholtz, vector
+elasticity, and mixed Stokes all use this path on CPU and Portable backends.
+Evaluation flags and diagonal blocks are derived from the expression rather
+than from PDE-specific patterns. A runtime kernel IR is not implemented.
 
 ### Milestone 4: CPU MatrixFree — implemented for the current subset
 

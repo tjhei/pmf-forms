@@ -26,6 +26,45 @@ using namespace pmf::forms;
 
 namespace
 {
+  template <int rank, int dim, typename Number>
+  struct PointEvaluation
+  {
+    using value_type =
+      std::conditional_t<rank == 1, Number, dealii::Tensor<1, dim, Number>>;
+    using gradient_type = dealii::Tensor<rank, dim, Number>;
+    value_type    value{};
+    gradient_type gradient{};
+
+    value_type
+    get_value(unsigned int) const
+    {
+      return value;
+    }
+    gradient_type
+    get_gradient(unsigned int) const
+    {
+      return gradient;
+    }
+  };
+
+  template <typename Form, int rank, int dim, typename Number>
+  auto
+  point_action(const Form                              &form,
+               const dealii::Tensor<rank, dim, Number> &gradient,
+               const Number                             value = Number())
+  {
+    using namespace expression_templates;
+    PointEvaluation<rank, dim, Number> evaluation;
+    evaluation.gradient = gradient;
+    if constexpr (rank == 1)
+      evaluation.value = value;
+    using Field = Trial<0, rank == 1 ? ValueShape::scalar : ValueShape::vector>;
+    internal::DiagonalContext<dim, Field, decltype(evaluation)> context{
+      evaluation, 0};
+    BilinearCellKernel<Form>{form}(context);
+    return std::make_pair(context.submitted_value, context.submitted_gradient);
+  }
+
   template <typename Destination, typename Source>
   void
   copy_vector(Destination &destination, const Source &source)
@@ -183,7 +222,7 @@ TEST_CASE("Stokes form is represented by expression-template types",
                               typename ReorderedFields::trial_fields>::value);
   STATIC_REQUIRE(std::is_same<typename StokesFields::test_fields,
                               typename ReorderedFields::test_fields>::value);
-  StokesQuadratureKernel<2, ReorderedForm> reordered_kernel(reordered);
+  BilinearCellKernel<ReorderedForm> reordered_kernel(reordered);
   static_assert(internal::FieldRequirements<StokesForm, decltype(u)>::gradient,
                 "velocity trial must require gradients");
   static_assert(internal::FieldRequirements<StokesForm, decltype(p)>::value,
@@ -225,7 +264,7 @@ TEST_CASE("Expression-template forms retain their structure in types",
   gradient[1][1] = 5.0;
   dealii::Tensor<2, 2, double> stress;
   stress = 0.0;
-  expression_templates::internal::apply_form(elasticity, gradient, stress);
+  stress = point_action(elasticity, gradient).second;
 
   REQUIRE(stress[0][0] == Catch::Approx(22.0));
   REQUIRE(stress[0][1] == Catch::Approx(12.0));
@@ -237,7 +276,7 @@ TEST_CASE("Expression-template forms retain their structure in types",
                                  dx);
   STATIC_REQUIRE(FormFields<decltype(combined)>::n_coefficients == 2);
   dealii::Tensor<2, 2, double> combined_stress;
-  internal::apply_form(combined, gradient, combined_stress);
+  combined_stress = point_action(combined, gradient).second;
   REQUIRE((combined_stress - stress).norm() == Catch::Approx(0.0));
 }
 
@@ -258,12 +297,12 @@ TEST_CASE("Scalar forms read independent embedded coefficients",
   dealii::Tensor<1, 2, double> flux;
   flux = 0.0;
 
-  internal::apply_scalar_form(unit_form, gradient, flux, 1.0);
+  flux = point_action(unit_form, gradient).second;
   REQUIRE(flux[0] == Catch::Approx(2.0));
   REQUIRE(flux[1] == Catch::Approx(-1.0));
 
   flux = 0.0;
-  internal::apply_scalar_form(weighted_form, gradient, flux, 1.0);
+  flux = point_action(weighted_form, gradient).second;
   REQUIRE(flux[0] == Catch::Approx(6.0));
   REQUIRE(flux[1] == Catch::Approx(-3.0));
 
@@ -273,28 +312,27 @@ TEST_CASE("Scalar forms read independent embedded coefficients",
     integral(diffusion * inner(grad(v), grad(u)) + beta * (v * u), dx);
   flux                   = 0.0;
   double submitted_value = 0.0;
-  internal::apply_scalar_form(
-    weighted_helmholtz, 6.0, gradient, submitted_value, flux, 1.0);
+  std::tie(submitted_value, flux) =
+    point_action(weighted_helmholtz, gradient, 6.0);
   REQUIRE(flux[0] == Catch::Approx(5.0));
   REQUIRE(flux[1] == Catch::Approx(-2.5));
   REQUIRE(submitted_value == Catch::Approx(24.0));
 
   STATIC_REQUIRE(FormFields<decltype(weighted_helmholtz)>::n_coefficients == 2);
   STATIC_REQUIRE(std::is_same<decltype(beta), decltype(diffusion)>::value);
-  auto       owned_coefficient = coefficient(-2.0);
-  const auto copied_form       = integral(owned_coefficient * (v * u), dx);
-  owned_coefficient.value      = 9.0;
-  submitted_value              = 0.0;
-  internal::apply_scalar_form(
-    copied_form, 6.0, gradient, submitted_value, flux, 1.0);
+  auto       owned_coefficient    = coefficient(-2.0);
+  const auto copied_form          = integral(owned_coefficient * (v * u), dx);
+  owned_coefficient.value         = 9.0;
+  submitted_value                 = 0.0;
+  std::tie(submitted_value, flux) = point_action(copied_form, gradient, 6.0);
   REQUIRE(submitted_value == Catch::Approx(-12.0));
 
   const auto literal_helmholtz =
     integral(2.0 * inner(grad(v), grad(u)) + v * (3.0 * u), dx);
   flux            = 0.0;
   submitted_value = 0.0;
-  internal::apply_scalar_form(
-    literal_helmholtz, 6.0, gradient, submitted_value, flux, 1.0);
+  std::tie(submitted_value, flux) =
+    point_action(literal_helmholtz, gradient, 6.0);
   REQUIRE(flux[0] == Catch::Approx(4.0));
   REQUIRE(flux[1] == Catch::Approx(-2.0));
   REQUIRE(submitted_value == Catch::Approx(18.0));
