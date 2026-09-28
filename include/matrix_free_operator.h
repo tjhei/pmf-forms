@@ -227,6 +227,16 @@ namespace pmf
           {
             static_cast<Slot<Field> &>(*this).submitted_gradient += gradient;
           }
+
+          template <typename Field, typename Value>
+          DEAL_II_HOST_DEVICE void
+          submit_divergence(const Value &value)
+          {
+            auto &gradient =
+              static_cast<Slot<Field> &>(*this).submitted_gradient;
+            for (unsigned int direction = 0; direction < dimension; ++direction)
+              gradient[direction][direction] += value;
+          }
         };
 
         template <int dim, typename Degrees, typename Number>
@@ -310,6 +320,16 @@ namespace pmf
           {
             if constexpr (Field::index == SelectedField::index)
               submitted_gradient += gradient;
+          }
+
+          template <typename Field, typename Value>
+          DEAL_II_HOST_DEVICE void
+          submit_divergence(const Value &value)
+          {
+            if constexpr (Field::index == SelectedField::index)
+              for (unsigned int direction = 0; direction < dimension;
+                   ++direction)
+                submitted_gradient[direction][direction] += value;
           }
         };
 

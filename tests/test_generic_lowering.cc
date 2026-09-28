@@ -377,6 +377,16 @@ TEST_CASE("Generic vector lowering matches independent FEValues integration",
                dx);
     check_against_fe_values<2, false>(form, weights);
   }
+  SECTION("only divergence contributions with both signs")
+  {
+    weights.mu = 0.0;
+    const auto form =
+      integral((lambda + coefficient(0.5)) * div(test_field) * div(trial_field),
+               dx) -
+      integral(coefficient(0.5) * div(trial_field) * div(test_field), dx);
+    check_against_fe_values<2, false>(form, weights);
+    check_against_fe_values<3, false, 2, 3>(form, weights);
+  }
 }
 
 TEST_CASE(
@@ -406,6 +416,16 @@ TEST_CASE(
                dx) -
       integral(div(test_velocity) * pressure, dx) -
       integral(test_pressure * div(velocity), dx);
+    check_against_fe_values<3, true, 1, 3>(form, Weights{});
+  }
+  SECTION("pressure diagonal update precedes the full gradient contribution")
+  {
+    const auto form =
+      integral(-1 * div(test_velocity) * pressure, dx) +
+      integral(2 * mu * inner(sym(grad(test_velocity)), sym(grad(velocity))),
+               dx) -
+      integral(test_pressure * div(velocity), dx);
+    check_against_fe_values<2, true>(form, Weights{});
     check_against_fe_values<3, true, 1, 3>(form, Weights{});
   }
   SECTION("different coupling signs, multiple coefficients, and mass blocks")

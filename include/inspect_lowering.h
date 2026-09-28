@@ -126,6 +126,16 @@ namespace pmf
           {
             accumulate(Field::index, true, value);
           }
+
+          template <typename Field>
+          void
+          submit_divergence(const InspectionValue &value)
+          {
+            auto &sum = submitted[{Field::index, true}];
+            if (!sum)
+              sum = inspection_node(LoweringOpcode::zero_tensor);
+            sum = inspection_node(LoweringOpcode::add_diagonal, {sum, value});
+          }
         };
 
         template <>
@@ -167,12 +177,6 @@ namespace pmf
           symmetrize(const InspectionValue &value)
           {
             return inspection_node(LoweringOpcode::symmetrize, {value});
-          }
-
-          static InspectionValue
-          identity(const InspectionValue &value)
-          {
-            return inspection_node(LoweringOpcode::identity, {value});
           }
 
           static InspectionValue
@@ -238,7 +242,10 @@ namespace pmf
        * values. Equal operations (including equal coefficient values) share
        * temporary IDs; coefficient variable names are not retained by the form
        * API. Unit scaling and initial zero accumulation are omitted for
-       * readability. Other arithmetic, including test-adjoint symmetrization,
+       * readability, except for the zero tensor needed by a leading diagonal
+       * update. Diagonal updates preserve the other tensor entries and model
+       * in-place accumulation without constructing a scaled identity tensor.
+       * Other arithmetic, including test-adjoint symmetrization,
        * is preserved. Inspection allocates only when explicitly called and
        * requires no mesh, MatrixFree object, spatial dimension, or initialized
        * execution backend.

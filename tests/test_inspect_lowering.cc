@@ -60,6 +60,22 @@ namespace
   }
 
   auto
+  expression_key(const LoweringOpcode     opcode,
+                 const unsigned int       field,
+                 const std::string       &literal,
+                 std::vector<std::string> operands)
+  {
+    if (opcode == LoweringOpcode::add || opcode == LoweringOpcode::multiply ||
+        opcode == LoweringOpcode::scalar_product)
+      std::sort(operands.begin(), operands.end());
+    std::string expression = std::to_string(static_cast<int>(opcode)) + "[" +
+                             std::to_string(field) + ":" + literal;
+    for (const auto &operand : operands)
+      expression += ";" + operand;
+    return expression + "]";
+  }
+
+  auto
   essential_program(const KernelIR &kernel)
   {
     std::vector<std::string> expressions;
@@ -72,16 +88,25 @@ namespace
             REQUIRE(operand < index);
             operands.push_back(expressions[operand]);
           }
-        if (operation.opcode == LoweringOpcode::add ||
-            operation.opcode == LoweringOpcode::multiply ||
-            operation.opcode == LoweringOpcode::scalar_product)
-          std::sort(operands.begin(), operands.end());
-        std::string expression =
-          std::to_string(static_cast<int>(operation.opcode)) + "[" +
-          std::to_string(operation.field) + ":" + operation.literal;
-        for (const auto &operand : operands)
-          expression += ";" + operand;
-        expressions.push_back(expression + "]");
+        if (operation.opcode == LoweringOpcode::add_diagonal)
+          {
+            REQUIRE(operands.size() == 2);
+            const auto diagonal =
+              expression_key(LoweringOpcode::identity, 0, {}, {operands[1]});
+            const auto zero =
+              expression_key(LoweringOpcode::zero_tensor, 0, {}, {});
+            expressions.push_back(operands[0] == zero ?
+                                    diagonal :
+                                    expression_key(LoweringOpcode::add,
+                                                   0,
+                                                   {},
+                                                   {operands[0], diagonal}));
+          }
+        else
+          expressions.push_back(expression_key(operation.opcode,
+                                               operation.field,
+                                               operation.literal,
+                                               std::move(operands)));
       }
     std::map<std::pair<unsigned int, bool>, std::string> result;
     for (const auto &submission : kernel.submissions)
@@ -182,12 +207,13 @@ TEST_CASE("Elasticity inspection reuses gradients and accumulates stress",
   check_read(kernel, LoweringOpcode::get_gradient, 0);
   CHECK(count(kernel, LoweringOpcode::get_value) == 0);
   CHECK(count(kernel, LoweringOpcode::trace) == 1);
-  CHECK(count(kernel, LoweringOpcode::identity) == 1);
+  CHECK(count(kernel, LoweringOpcode::identity) == 0);
+  CHECK(count(kernel, LoweringOpcode::add_diagonal) == 1);
   CHECK(count(kernel, LoweringOpcode::symmetrize) == 2);
   REQUIRE(kernel.submissions.size() == 1);
   check_submission(kernel, 0, true);
   CHECK(kernel.operations.at(kernel.submissions[0].operand).opcode ==
-        LoweringOpcode::add);
+        LoweringOpcode::add_diagonal);
   check_equivalent(
     kernel,
     inspect_lowering(
@@ -280,21 +306,54 @@ TEST_CASE("Stokes benchmark inspection has no symmetric-gradient operations",
   check_submission(kernel, 1, false);
   CHECK(count(kernel, LoweringOpcode::symmetrize) == 0);
   CHECK(count(kernel, LoweringOpcode::trace) == 1);
-  CHECK(count(kernel, LoweringOpcode::identity) == 1);
+  CHECK(count(kernel, LoweringOpcode::identity) == 0);
+  CHECK(count(kernel, LoweringOpcode::add) == 0);
+  CHECK(count(kernel, LoweringOpcode::add_diagonal) == 1);
   REQUIRE(kernel.submissions.size() == 2);
   const auto &stress = kernel.operations.at(kernel.submissions[0].operand);
-  REQUIRE(stress.opcode == LoweringOpcode::add);
+  REQUIRE(stress.opcode == LoweringOpcode::add_diagonal);
   CHECK(kernel.operations.at(stress.operands.at(0)).opcode ==
         LoweringOpcode::get_gradient);
-  const auto &pressure_tensor = kernel.operations.at(stress.operands.at(1));
-  REQUIRE(pressure_tensor.opcode == LoweringOpcode::identity);
-  const auto &negative_pressure =
-    kernel.operations.at(pressure_tensor.operands.at(0));
+  const auto &negative_pressure = kernel.operations.at(stress.operands.at(1));
   REQUIRE(negative_pressure.opcode == LoweringOpcode::negate);
   const auto &pressure_read =
     kernel.operations.at(negative_pressure.operands.at(0));
   CHECK(pressure_read.opcode == LoweringOpcode::get_value);
   CHECK(pressure_read.field == 1);
+  essential_program(kernel);
+  std::ostringstream stream;
+  stream << kernel;
+  CHECK(stream.str().find("add_diagonal(") != std::string::npos);
+  CHECK(stream.str().find(" * identity") == std::string::npos);
+  check_equivalent(kernel,
+                   inspect_lowering(
+                     integral(-1 * div(test_velocity) * pressure, dx) +
+                     integral(inner(grad(test_velocity), grad(velocity)), dx) -
+                     integral(test_pressure * div(velocity), dx)));
+}
+
+TEST_CASE("Leading and repeated divergence contributions update a zero tensor",
+          "[forms][inspection]")
+{
+  const auto velocity      = trial<ValueShape::vector>();
+  const auto test_velocity = test<ValueShape::vector>();
+  const auto contribution  = integral(div(test_velocity) * div(velocity), dx);
+  const auto kernel        = inspect_lowering(contribution - contribution);
+  CHECK(count(kernel, LoweringOpcode::zero_tensor) == 1);
+  CHECK(count(kernel, LoweringOpcode::add_diagonal) == 2);
+  CHECK(count(kernel, LoweringOpcode::identity) == 0);
+  CHECK(count(kernel, LoweringOpcode::add) == 0);
+  REQUIRE(kernel.submissions.size() == 1);
+  check_submission(kernel, 0, true);
+  const auto &last = kernel.operations.at(kernel.submissions[0].operand);
+  REQUIRE(last.opcode == LoweringOpcode::add_diagonal);
+  const auto &first = kernel.operations.at(last.operands.at(0));
+  REQUIRE(first.opcode == LoweringOpcode::add_diagonal);
+  CHECK(kernel.operations.at(first.operands.at(0)).opcode ==
+        LoweringOpcode::zero_tensor);
+  const auto &negative = kernel.operations.at(last.operands.at(1));
+  REQUIRE(negative.opcode == LoweringOpcode::negate);
+  CHECK(negative.operands.at(0) == first.operands.at(1));
   essential_program(kernel);
 }
 

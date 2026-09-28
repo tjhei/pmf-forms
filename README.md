@@ -171,9 +171,14 @@ std::cout << lowering;
 The output lists each trial field's value/gradient requirements, each test
 field's integration requirements, and a quadrature-point kernel with numbered
 temporaries. It shows `get_value`, `get_gradient`, arithmetic, `symmetrize`,
-`trace`, scalar products, multiplication by the identity tensor, and final
+`trace`, scalar products, diagonal updates (`add_diagonal`), and final
 `submit_value`/`submit_gradient` calls. Contributions to the same test field
 and quantity are accumulated before submission.
+Test-divergence contributions update only the gradient accumulator's diagonal;
+they do not construct a scaled identity tensor or perform a full tensor add.
+`add_diagonal(tensor, scalar)` names the updated accumulator in the IR, without
+implying a tensor copy. A leading divergence contribution starts from
+`zero_tensor`, so later gradient contributions still accumulate correctly.
 
 `KernelIR` also exposes `inputs`, `outputs`, `operations`, and `submissions`
 for programmatic checks. An operation's index is its temporary ID, its
@@ -186,7 +191,8 @@ Inspection uses the same `BilinearCellKernel`, compile-time field analysis,
 and adjoint lowering as execution, with symbolic arithmetic. The CPU and
 Portable kernels continue to use statically compiled arithmetic; they do not
 construct or interpret this IR. The display omits unit scaling and initial
-zero accumulation, but preserves test-adjoint operations (including the
+zero accumulation (except for a leading diagonal update), but preserves
+test-adjoint operations (including the
 second symmetrization in a symmetric-gradient form). Shared IDs describe
 expression reuse, not a guarantee of compiler common-subexpression elimination
 or an instruction count. Temporary numbering and arithmetic association may

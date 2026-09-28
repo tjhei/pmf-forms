@@ -51,18 +51,6 @@ namespace pmf
           {
             return dealii::scalar_product(left, right);
           }
-
-          template <typename Adjoint>
-          DEAL_II_HOST_DEVICE static auto
-          identity(const Adjoint &adjoint)
-          {
-            dealii::Tensor<2, Context::dimension, typename Context::Number>
-              gradient;
-            for (unsigned int direction = 0; direction < Context::dimension;
-                 ++direction)
-              gradient[direction][direction] = adjoint;
-            return gradient;
-          }
         };
 
         template <typename Expression>
@@ -264,8 +252,8 @@ namespace pmf
                  const Adjoint &adjoint,
                  Context       &context)
           {
-            context.template submit_gradient<Test<Index, ValueShape::vector>>(
-              LoweringAlgebra<Context>::identity(adjoint));
+            context.template submit_divergence<Test<Index, ValueShape::vector>>(
+              adjoint);
           }
         };
 
