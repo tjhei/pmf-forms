@@ -6,5 +6,6 @@
  */
 
 #include <expression_templates.h>
+#include <inspect_lowering.h>
 
 #endif // PMF_FORM_FORMS_H

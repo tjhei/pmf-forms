@@ -158,6 +158,49 @@ MPI ranks with:
 mpiexec -n 2 ./build/pmf_form_tests "[stokes]"
 ```
 
+## Inspecting the lowering
+
+Include `forms.h` (or `inspect_lowering.h`) and inspect a form without creating
+a mesh or MatrixFree object:
+
+```cpp
+const auto lowering = inspect_lowering(stokes);
+std::cout << lowering;
+```
+
+The output lists each trial field's value/gradient requirements, each test
+field's integration requirements, and a quadrature-point kernel with numbered
+temporaries. It shows `get_value`, `get_gradient`, arithmetic, `symmetrize`,
+`trace`, scalar products, multiplication by the identity tensor, and final
+`submit_value`/`submit_gradient` calls. Contributions to the same test field
+and quantity are accumulated before submission.
+
+`KernelIR` also exposes `inputs`, `outputs`, `operations`, and `submissions`
+for programmatic checks. An operation's index is its temporary ID, its
+`LoweringOpcode` identifies the operation, and its `operands` refer to earlier
+IDs. Repeated equal expressions share IDs, including field reads and
+coefficient values. Coefficients print their owned numeric values; C++ variable
+names such as `mu` are not retained by the expression API.
+
+Inspection uses the same `BilinearCellKernel`, compile-time field analysis,
+and adjoint lowering as execution, with symbolic arithmetic. The CPU and
+Portable kernels continue to use statically compiled arithmetic; they do not
+construct or interpret this IR. The display omits unit scaling and initial
+zero accumulation, but preserves test-adjoint operations (including the
+second symmetrization in a symmetric-gradient form). Shared IDs describe
+expression reuse, not a guarantee of compiler common-subexpression elimination
+or an instruction count. Temporary numbering and arithmetic association may
+change with expression order. The IR does not describe gather/scatter,
+constraints, geometry, or backend scheduling.
+
+`tests/test_inspect_lowering.cc` checks Laplace, Helmholtz, elasticity, and
+Stokes inspection, including shared reads, accumulated submissions, and
+equivalent programs after reordering terms or contraction operands. Run with:
+
+```sh
+mpiexec -n 1 ./build/pmf_form_tests "[inspection]"
+```
+
 ## Supported forms
 
 The generic evaluator handles bilinear cell forms built from scalar/vector

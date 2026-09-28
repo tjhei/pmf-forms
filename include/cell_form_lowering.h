@@ -13,6 +13,58 @@ namespace pmf
     {
       namespace internal
       {
+        template <typename Context>
+        struct LoweringAlgebra
+        {
+          template <typename Number>
+          DEAL_II_HOST_DEVICE static auto
+          constant(const Context &, const Number value)
+          {
+            return typename Context::Number(value);
+          }
+
+          template <typename Number>
+          DEAL_II_HOST_DEVICE static auto
+          coefficient(const Context &context, const Number value)
+          {
+            return constant(context, value);
+          }
+
+          template <typename Tensor>
+          DEAL_II_HOST_DEVICE static auto
+          trace(const Tensor &tensor)
+          {
+            return dealii::trace(tensor);
+          }
+
+          template <typename Tensor>
+          DEAL_II_HOST_DEVICE static auto
+          symmetrize(const Tensor &tensor)
+          {
+            return typename Context::Number(0.5) *
+                   (tensor + dealii::transpose(tensor));
+          }
+
+          template <typename Left, typename Right>
+          DEAL_II_HOST_DEVICE static auto
+          scalar_product(const Left &left, const Right &right)
+          {
+            return dealii::scalar_product(left, right);
+          }
+
+          template <typename Adjoint>
+          DEAL_II_HOST_DEVICE static auto
+          identity(const Adjoint &adjoint)
+          {
+            dealii::Tensor<2, Context::dimension, typename Context::Number>
+              gradient;
+            for (unsigned int direction = 0; direction < Context::dimension;
+                 ++direction)
+              gradient[direction][direction] = adjoint;
+            return gradient;
+          }
+        };
+
         template <typename Expression>
         struct PolynomialDegree
         {
@@ -145,9 +197,10 @@ namespace pmf
         {
           template <typename Context>
           DEAL_II_HOST_DEVICE static auto
-          evaluate(const Constant<Number> &expression, const Context &)
+          evaluate(const Constant<Number> &expression, const Context &context)
           {
-            return typename Context::Number(expression.value);
+            return LoweringAlgebra<Context>::constant(context,
+                                                      expression.value);
           }
         };
 
@@ -156,9 +209,11 @@ namespace pmf
         {
           template <typename Context>
           DEAL_II_HOST_DEVICE static auto
-          evaluate(const Coefficient<Number> &expression, const Context &)
+          evaluate(const Coefficient<Number> &expression,
+                   const Context             &context)
           {
-            return typename Context::Number(expression.value);
+            return LoweringAlgebra<Context>::coefficient(context,
+                                                         expression.value);
           }
         };
 
@@ -195,7 +250,7 @@ namespace pmf
           evaluate(const Divergence<Trial<Index, ValueShape::vector>> &,
                    const Context &context)
           {
-            return dealii::trace(
+            return LoweringAlgebra<Context>::trace(
               context.template gradient<Trial<Index, ValueShape::vector>>());
           }
         };
@@ -209,13 +264,8 @@ namespace pmf
                  const Adjoint &adjoint,
                  Context       &context)
           {
-            dealii::Tensor<2, Context::dimension, typename Context::Number>
-              gradient;
-            for (unsigned int direction = 0; direction < Context::dimension;
-                 ++direction)
-              gradient[direction][direction] = adjoint;
             context.template submit_gradient<Test<Index, ValueShape::vector>>(
-              gradient);
+              LoweringAlgebra<Context>::identity(adjoint));
           }
         };
 
@@ -229,8 +279,7 @@ namespace pmf
           {
             const auto tensor =
               Lower<Expression>::evaluate(expression.expression, context);
-            return typename Context::Number(0.5) *
-                   (tensor + dealii::transpose(tensor));
+            return LoweringAlgebra<Context>::symmetrize(tensor);
           }
 
           template <typename Adjoint, typename Context>
@@ -240,8 +289,8 @@ namespace pmf
                  Context                      &context)
           {
             Lower<Expression>::submit(expression.expression,
-                                      typename Context::Number(0.5) *
-                                        (adjoint + dealii::transpose(adjoint)),
+                                      LoweringAlgebra<Context>::symmetrize(
+                                        adjoint),
                                       context);
           }
         };
@@ -313,10 +362,10 @@ namespace pmf
             const auto value = Lower<OtherExpression>::evaluate(other, context);
             if constexpr (TestExpression::shape == ValueShape::scalar &&
                           OtherExpression::shape != ValueShape::scalar)
-              Lower<TestExpression>::submit(test_expression,
-                                            dealii::scalar_product(adjoint,
-                                                                   value),
-                                            context);
+              Lower<TestExpression>::submit(
+                test_expression,
+                LoweringAlgebra<Context>::scalar_product(adjoint, value),
+                context);
             else
               Lower<TestExpression>::submit(test_expression,
                                             adjoint * value,
@@ -343,7 +392,7 @@ namespace pmf
           DEAL_II_HOST_DEVICE static auto
           evaluate(const Inner<Left, Right> &expression, const Context &context)
           {
-            return dealii::scalar_product(
+            return LoweringAlgebra<Context>::scalar_product(
               Lower<Left>::evaluate(expression.left, context),
               Lower<Right>::evaluate(expression.right, context));
           }
@@ -415,9 +464,10 @@ namespace pmf
         DEAL_II_HOST_DEVICE void
         operator()(Context &context) const
         {
-          internal::Lower<Form>::submit(form,
-                                        typename Context::Number(1),
-                                        context);
+          internal::Lower<Form>::submit(
+            form,
+            internal::LoweringAlgebra<Context>::constant(context, 1),
+            context);
         }
 
       private:
