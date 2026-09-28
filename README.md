@@ -168,7 +168,11 @@ fields; nonlinear or affine terms are rejected at compile time. Coefficients
 and literals are arithmetic constants stored by value.
 
 Operators support two and three spatial dimensions, with one DoFHandler per
-field and a common polynomial degree and quadrature rule. Trial and test
+field. Supply a single polynomial degree for uniform-degree fields, or one
+degree per field, for example `make_matrix_free_operator<3, 2, 1>(data, form)`
+for Q2 velocity and Q1 pressure. The portable factory uses the same syntax.
+All fields share a quadrature rule with one more point per direction than
+the largest field degree. Trial and test
 fields must have matching shapes and contiguous indices starting at zero.
 Multiple fields use distributed block vectors. Gradients and divergences
 apply directly to field symbols, not to composite expressions.
@@ -186,6 +190,45 @@ directory:
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+### Stokes operator throughput
+
+`stokes/stokes.cc` benchmarks operator application only: no solver, multigrid,
+diagonal computation, or assembly is timed. It matches `step-104.cc`:
+the 3D unit cube, global refinement starting at level 2, separate Q2 vector
+velocity and Q1 scalar pressure spaces, QGauss(3), MappingQ(1), zero velocity
+boundary constraints, and unconstrained pressure. Its form uses the full
+velocity gradient, `inner(grad(v), grad(u)) - div(v)*p - q*div(u)`, not the
+symmetric-gradient viscosity form in the Stokes example above.
+
+```sh
+cmake --build build --target stokes
+mpiexec -n 1 ./build/stokes 4 100 7
+```
+
+Arguments are the maximum global refinement level (default 4), applications
+per sample (100), and samples (5). Levels 2 through the requested maximum are
+run. The `stokes` target uses Release compilation and the Release deal.II
+library even when the other targets use Debug.
+
+Both backends are checked against hand-written reference operators before
+timing. The Portable reference implements the Stokes cell operation and
+`vmult` from `step-104.cc`; the CPU reference adapts that operation to
+`FEEvaluation`. Each generic/reference pair shares its MatrixFree data,
+vectors, constraints, and compiler settings.
+
+The benchmark reports median seconds per `vmult`, DoFs/s, MDoFs/s, sample
+ranges, and generic/reference time ratios (1 means equal throughput).
+Timing includes vector zeroing, communication, and constrained-row handling,
+but excludes setup, correctness checks, and host/device transfers. Two warmups
+precede repeated samples; ordering alternates, device work is fenced, and the
+slowest MPI rank determines each sample time. DoF counts include velocity and
+pressure, including constrained entries, as in step-104.
+
+Use these paired timings to assess overhead rather than comparing warmed
+samples directly with step-104's single cold application. Interpret small
+differences relative to sample variability. The printed execution space
+identifies whether Portable runs on a CPU or a GPU.
 
 The elasticity executable applies a form with embedded Lamé constants using both
 backends, compares the resulting distributed vectors, and exits with an error

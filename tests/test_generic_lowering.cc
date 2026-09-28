@@ -58,18 +58,21 @@ namespace
                          dealii::VectorOperation::insert);
   }
 
-  template <int components, bool mixed, typename Form>
+  template <int  components,
+            bool mixed,
+            int  pressure_degree = 2,
+            int  dim             = 2,
+            typename Form>
   void
   check_against_fe_values(const Form &form, const Weights weights)
   {
-    constexpr int                                     dim    = 2;
     constexpr int                                     degree = 2;
     dealii::parallel::distributed::Triangulation<dim> triangulation(
       MPI_COMM_WORLD);
     dealii::GridGenerator::hyper_cube(triangulation);
     triangulation.refine_global(1);
     dealii::FESystem<dim>   primary_fe(dealii::FE_Q<dim>(degree), components);
-    dealii::FE_Q<dim>       pressure_fe(degree);
+    dealii::FE_Q<dim>       pressure_fe(pressure_degree);
     dealii::DoFHandler<dim> primary_dofs(triangulation),
       pressure_dofs(triangulation);
     primary_dofs.distribute_dofs(primary_fe);
@@ -93,7 +96,7 @@ namespace
     dealii::MappingQ<dim> mapping(1);
     dealii::QGauss<1>     quadrature(degree + 1);
     auto cpu_data = std::make_shared<dealii::MatrixFree<dim, double>>();
-    dealii::MatrixFree<dim, double>::AdditionalData cpu_settings;
+    typename dealii::MatrixFree<dim, double>::AdditionalData cpu_settings;
     cpu_settings.mapping_update_flags = dealii::update_values |
                                         dealii::update_gradients |
                                         dealii::update_JxW_values;
@@ -101,16 +104,29 @@ namespace
       mapping, dof_handlers, constraint_pointers, quadrature, cpu_settings);
     auto portable_data =
       std::make_shared<dealii::Portable::MatrixFree<dim, double>>();
-    dealii::Portable::MatrixFree<dim, double>::AdditionalData portable_settings;
+    typename dealii::Portable::MatrixFree<dim, double>::AdditionalData
+      portable_settings;
     portable_settings.mapping_update_flags = cpu_settings.mapping_update_flags;
     portable_data->reinit(mapping,
                           dof_handlers,
                           constraint_pointers,
                           quadrature,
                           portable_settings);
-    const auto cpu = make_matrix_free_operator<dim, degree>(cpu_data, form);
-    const auto portable =
-      make_portable_matrix_free_operator<dim, degree>(portable_data, form);
+    const auto cpu = [&]() {
+      if constexpr (mixed)
+        return make_matrix_free_operator<dim, degree, pressure_degree>(cpu_data,
+                                                                       form);
+      else
+        return make_matrix_free_operator<dim, degree>(cpu_data, form);
+    }();
+    const auto portable = [&]() {
+      if constexpr (mixed)
+        return make_portable_matrix_free_operator<dim, degree, pressure_degree>(
+          portable_data, form);
+      else
+        return make_portable_matrix_free_operator<dim, degree>(portable_data,
+                                                               form);
+    }();
     typename decltype(cpu)::Vector source, reference, diagonal, cpu_result,
       portable_result;
     cpu.initialize_dof_vector(source);
@@ -380,6 +396,17 @@ TEST_CASE(
       integral(div(test_velocity) * pressure, dx) -
       integral(test_pressure * div(velocity), dx);
     check_against_fe_values<2, true>(form, Weights{});
+  }
+  SECTION("3D Q2-Q1 Stokes action and diagonal")
+  {
+    STATIC_REQUIRE(FieldDegrees<2, 1>::n_q_points_1d == 3);
+    STATIC_REQUIRE(FieldDegrees<2, 1>::degree<1>() == 1);
+    const auto form =
+      integral(2 * mu * inner(sym(grad(test_velocity)), sym(grad(velocity))),
+               dx) -
+      integral(div(test_velocity) * pressure, dx) -
+      integral(test_pressure * div(velocity), dx);
+    check_against_fe_values<3, true, 1, 3>(form, Weights{});
   }
   SECTION("different coupling signs, multiple coefficients, and mass blocks")
   {

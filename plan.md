@@ -32,6 +32,10 @@ Implemented and build-checked:
 - A two-field Stokes operator using separate velocity and pressure DoFHandlers
   and block vectors on CPU and Portable MatrixFree, with MPI unit tests for
   backend agreement and an interpolated manufactured solution.
+- Per-field polynomial degrees with a shared quadrature rule, including Q2-Q1.
+- A Release Stokes operator benchmark on the globally refined 3D unit cube,
+  comparing generic CPU and Portable application against the hand-written
+  step-104 operation, with correctness checks and repeated DoFs/s timings.
 - Catch2 unit and backend comparison cases.
 - Generic recursive trial evaluation and adjoint test submission for cell
   forms, including expression-derived per-field flags and diagonal blocks.
@@ -44,8 +48,8 @@ Implemented and build-checked:
 Still incomplete:
 
 - Variable coefficient fields and general coefficient binding to FE data.
-- Differential operators on composite expressions and heterogeneous field
-  degrees/quadrature rules.
+- Differential operators on composite expressions and different quadrature
+  rules for different fields.
 - `FEValues` assembly from the same form.
 - Validation of backend capabilities beyond the supported cell-form subset.
 - GPU hardware validation and performance comparison against hand-written

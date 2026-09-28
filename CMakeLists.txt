@@ -56,6 +56,10 @@ target_include_directories(laplace PRIVATE
 )
 deal_ii_setup_target(laplace)
 
+add_executable(stokes stokes/stokes.cc)
+target_include_directories(stokes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+deal_ii_setup_target(stokes RELEASE)
+
 file(GLOB_RECURSE PROJECT_FORMAT_FILES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
@@ -91,5 +95,13 @@ if(BUILD_TESTING)
   add_test(
     NAME pmf_form_lowering_mpi
     COMMAND mpiexec -n 2 $<TARGET_FILE:pmf_form_tests> "[lowering]"
+  )
+  add_test(
+    NAME stokes_benchmark_smoke
+    COMMAND mpiexec -n 1 $<TARGET_FILE:stokes> 2 2 3
+  )
+  add_test(
+    NAME stokes_benchmark_smoke_mpi
+    COMMAND mpiexec -n 2 $<TARGET_FILE:stokes> 2 2 3
   )
 endif()

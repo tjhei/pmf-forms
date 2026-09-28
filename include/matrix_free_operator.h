@@ -24,6 +24,36 @@ namespace pmf
   {
     namespace expression_templates
     {
+      /**
+       * @brief Polynomial degrees in field-index order, or one degree for all fields.
+       * @tparam Degrees Positive field degrees; quadrature uses the largest plus one.
+       */
+      template <int... Degrees>
+      struct FieldDegrees
+      {
+        static_assert(sizeof...(Degrees) > 0 && ((Degrees > 0) && ...),
+                      "provide positive field degrees");
+        /** @brief Number of supplied field degrees. */
+        static constexpr unsigned int size = sizeof...(Degrees);
+        /** @brief Return the degree of a field. @tparam index Field index. */
+        template <unsigned int index>
+        static constexpr int
+        degree()
+        {
+          static_assert(size == 1 || index < size, "missing field degree");
+          constexpr int degrees[] = {Degrees...};
+          return degrees[size == 1 ? 0 : index];
+        }
+        /** @brief Number of quadrature points in each coordinate direction. */
+        static constexpr int n_q_points_1d = []() {
+          int maximum = 0;
+          for (const int degree : {Degrees...})
+            if (degree > maximum)
+              maximum = degree;
+          return maximum + 1;
+        }();
+      };
+
       namespace internal
       {
         template <typename Form, typename Field>
@@ -54,6 +84,8 @@ namespace pmf
         {
           using TestField = Test<Field::index, Field::shape>;
           Evaluation                         evaluation;
+          typename Evaluation::value_type    trial_value;
+          typename Evaluation::gradient_type trial_gradient;
           typename Evaluation::value_type    submitted_value;
           typename Evaluation::gradient_type submitted_gradient;
 
@@ -63,8 +95,12 @@ namespace pmf
           {}
 
           DEAL_II_HOST_DEVICE void
-          clear()
+          prepare(const unsigned int point)
           {
+            if constexpr (FieldRequirements<Form, Field>::value)
+              trial_value = evaluation.get_value(point);
+            if constexpr (FieldRequirements<Form, Field>::gradient)
+              trial_gradient = evaluation.get_gradient(point);
             submitted_value    = typename Evaluation::value_type();
             submitted_gradient = typename Evaluation::gradient_type();
           }
@@ -99,36 +135,34 @@ namespace pmf
 
         template <int dim,
                   typename Form,
-                  template <int>
+                  template <typename>
                   class Evaluation,
                   typename Fields>
         struct EvaluationPack;
 
         template <int dim,
                   typename Form,
-                  template <int>
+                  template <typename>
                   class Evaluation,
                   typename... Fields>
         struct EvaluationPack<dim, Form, Evaluation, TypeList<Fields...>>
-          : EvaluationSlot<Form,
-                           Fields,
-                           Evaluation<field_components<Fields, dim>>>...
+          : EvaluationSlot<Form, Fields, Evaluation<Fields>>...
         {
-          using Number = typename Evaluation<1>::value_type;
+          using Number =
+            typename Evaluation<Trial<0, ValueShape::scalar>>::value_type;
           static constexpr unsigned int dimension = dim;
           static constexpr bool         mixed     = sizeof...(Fields) > 1;
           unsigned int                  point     = 0;
 
           template <typename Field>
-          using Slot = EvaluationSlot<Form,
-                                      Trial<Field::index, Field::shape>,
-                                      Evaluation<field_components<Field, dim>>>;
+          using Slot =
+            EvaluationSlot<Form,
+                           Trial<Field::index, Field::shape>,
+                           Evaluation<Trial<Field::index, Field::shape>>>;
 
           template <typename Data>
           DEAL_II_HOST_DEVICE explicit EvaluationPack(const Data &data)
-            : EvaluationSlot<Form,
-                             Fields,
-                             Evaluation<field_components<Fields, dim>>>(data)...
+            : EvaluationSlot<Form, Fields, Evaluation<Fields>>(data)...
           {}
 
           void
@@ -148,7 +182,7 @@ namespace pmf
           DEAL_II_HOST_DEVICE void
           clear()
           {
-            (static_cast<Slot<Fields> &>(*this).clear(), ...);
+            (static_cast<Slot<Fields> &>(*this).prepare(point), ...);
           }
 
           DEAL_II_HOST_DEVICE void
@@ -170,16 +204,14 @@ namespace pmf
           DEAL_II_HOST_DEVICE auto
           value() const
           {
-            return static_cast<const Slot<Field> &>(*this).evaluation.get_value(
-              point);
+            return static_cast<const Slot<Field> &>(*this).trial_value;
           }
 
           template <typename Field>
           DEAL_II_HOST_DEVICE auto
           gradient() const
           {
-            return static_cast<const Slot<Field> &>(*this)
-              .evaluation.get_gradient(point);
+            return static_cast<const Slot<Field> &>(*this).trial_gradient;
           }
 
           template <typename Field, typename Value>
@@ -197,20 +229,28 @@ namespace pmf
           }
         };
 
-        template <int dim, int degree, typename Number>
+        template <int dim, typename Degrees, typename Number>
         struct CpuEvaluation
         {
-          template <int components>
+          template <typename Field>
           using type =
-            dealii::FEEvaluation<dim, degree, degree + 1, components, Number>;
+            dealii::FEEvaluation<dim,
+                                 Degrees::template degree<Field::index>(),
+                                 Degrees::n_q_points_1d,
+                                 field_components<Field, dim>,
+                                 Number>;
         };
 
-        template <int dim, int degree, typename Number>
+        template <int dim, typename Degrees, typename Number>
         struct PortableEvaluation
         {
-          template <int components>
-          using type = dealii::Portable::
-            FEEvaluation<dim, degree, degree + 1, components, Number>;
+          template <typename Field>
+          using type = dealii::Portable::FEEvaluation<
+            dim,
+            Degrees::template degree<Field::index>(),
+            Degrees::n_q_points_1d,
+            field_components<Field, dim>,
+            Number>;
         };
 
         template <typename TensorType>
@@ -302,7 +342,7 @@ namespace pmf
         };
 
         template <int dim,
-                  int degree,
+                  typename Degrees,
                   typename Form,
                   typename Field,
                   typename Number,
@@ -313,8 +353,7 @@ namespace pmf
                                const BilinearCellKernel<Form>        &kernel)
         {
           using Evaluation =
-            typename CpuEvaluation<dim, degree, Number>::template type<
-              field_components<Field, dim>>;
+            typename CpuEvaluation<dim, Degrees, Number>::template type<Field>;
           using Kernel = DiagonalKernel<dim, Form, Field>;
           const std::function<void(Evaluation &)> operation =
             [&kernel](Evaluation &evaluation) {
@@ -334,7 +373,7 @@ namespace pmf
         }
 
         template <int dim,
-                  int degree,
+                  typename Degrees,
                   typename Form,
                   typename Field,
                   typename Number,
@@ -348,8 +387,8 @@ namespace pmf
           using Kernel = DiagonalKernel<dim, Form, Field>;
           dealii::MatrixFreeTools::compute_diagonal<
             dim,
-            degree,
-            degree + 1,
+            Degrees::template degree<Field::index>(),
+            Degrees::n_q_points_1d,
             field_components<Field, dim>,
             Number>(data,
                     diagonal,
@@ -360,7 +399,7 @@ namespace pmf
         }
 
         template <int dim,
-                  int degree,
+                  typename Degrees,
                   typename Form,
                   typename Data,
                   typename Vector,
@@ -372,7 +411,7 @@ namespace pmf
                          TypeList<Fields...>)
         {
           data.initialize_dof_vector(diagonal);
-          (compute_field_diagonal<dim, degree, Form, Fields>(
+          (compute_field_diagonal<dim, Degrees, Form, Fields>(
              data,
              field_vector<(sizeof...(Fields) > 1)>(diagonal, Fields::index),
              kernel),
@@ -436,7 +475,8 @@ namespace pmf
       /**
        * @brief CPU MatrixFree application of a statically lowered bilinear cell form.
        * @tparam dim Spatial dimension (two or three).
-       * @tparam fe_degree Common polynomial degree of all fields.
+       * @tparam fe_degree Default polynomial degree.
+       * @tparam Degrees Field-degree policy, defaulting to a uniform degree.
        * @tparam Form The owned cell-form expression type.
        * @tparam Number Scalar number type.
        * @tparam VectorType Distributed vector, or block vector for multiple fields.
@@ -446,7 +486,8 @@ namespace pmf
                 int fe_degree,
                 typename Form,
                 typename Number,
-                typename VectorType>
+                typename VectorType,
+                typename Degrees = FieldDegrees<fe_degree>>
       class MatrixFreeCellOperator
         : public dealii::MatrixFreeOperators::Base<dim, VectorType>,
           private internal::
@@ -455,6 +496,9 @@ namespace pmf
         static_assert(dim == 2 || dim == 3,
                       "cell lowering supports dimensions two and three");
         using Fields = typename FormFields<Form>::trial_fields;
+        static_assert(Degrees::size == 1 ||
+                        Degrees::size == FormFields<Form>::n_trial_fields,
+                      "provide one degree or one degree per field");
 
       public:
         using Data   = dealii::MatrixFree<dim, Number>;
@@ -487,10 +531,10 @@ namespace pmf
             {
               auto result =
                 std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-              internal::compute_diagonal<dim, fe_degree>(*this->data,
-                                                         result->get_vector(),
-                                                         kernel,
-                                                         Fields{});
+              internal::compute_diagonal<dim, Degrees>(*this->data,
+                                                       result->get_vector(),
+                                                       kernel,
+                                                       Fields{});
               cached_diagonal = std::move(result);
             }
           return cached_diagonal->get_vector();
@@ -565,7 +609,7 @@ namespace pmf
           internal::EvaluationPack<
             dim,
             Form,
-            internal::CpuEvaluation<dim, fe_degree, Number>::template type,
+            internal::CpuEvaluation<dim, Degrees, Number>::template type,
             Fields>
             evaluations(data);
           for (unsigned int cell = range.first; cell < range.second; ++cell)
@@ -573,7 +617,7 @@ namespace pmf
               evaluations.reinit(cell);
               evaluations.read(source);
               for (unsigned int point = 0;
-                   point < dealii::Utilities::pow(fe_degree + 1, dim);
+                   point < dealii::Utilities::pow(Degrees::n_q_points_1d, dim);
                    ++point)
                 {
                   evaluations.point = point;
@@ -593,7 +637,8 @@ namespace pmf
       /**
        * @brief Portable MatrixFree application using the same bilinear cell lowering.
        * @tparam dim Spatial dimension (two or three).
-       * @tparam fe_degree Common polynomial degree of all fields.
+       * @tparam fe_degree Default polynomial degree.
+       * @tparam Degrees Field-degree policy, defaulting to a uniform degree.
        * @tparam Form The owned cell-form expression type.
        * @tparam Number Scalar number type.
        * @tparam VectorType Distributed vector, or block vector for multiple fields.
@@ -603,7 +648,8 @@ namespace pmf
                 int fe_degree,
                 typename Form,
                 typename Number,
-                typename VectorType>
+                typename VectorType,
+                typename Degrees = FieldDegrees<fe_degree>>
       class PortableMatrixFreeCellOperator
         : public dealii::EnableObserverPointer,
           private internal::
@@ -612,6 +658,9 @@ namespace pmf
         static_assert(dim == 2 || dim == 3,
                       "cell lowering supports dimensions two and three");
         using Fields = typename FormFields<Form>::trial_fields;
+        static_assert(Degrees::size == 1 ||
+                        Degrees::size == FormFields<Form>::n_trial_fields,
+                      "provide one degree or one degree per field");
 
       public:
         using Data   = dealii::Portable::MatrixFree<dim, Number>;
@@ -652,10 +701,10 @@ namespace pmf
             {
               auto result =
                 std::make_shared<dealii::DiagonalMatrix<VectorType>>();
-              internal::compute_diagonal<dim, fe_degree>(*data,
-                                                         result->get_vector(),
-                                                         cell_operation.kernel,
-                                                         Fields{});
+              internal::compute_diagonal<dim, Degrees>(*data,
+                                                       result->get_vector(),
+                                                       cell_operation.kernel,
+                                                       Fields{});
               cached_diagonal = std::move(result);
             }
           return cached_diagonal->get_vector();
@@ -713,7 +762,7 @@ namespace pmf
         struct CellOperation
         {
           static constexpr unsigned int n_q_points =
-            dealii::Utilities::pow(fe_degree + 1, dim);
+            dealii::Utilities::pow(Degrees::n_q_points_1d, dim);
           BilinearCellKernel<Form> kernel;
 
           template <typename DeviceVector>
@@ -725,18 +774,16 @@ namespace pmf
             internal::EvaluationPack<
               dim,
               Form,
-              internal::PortableEvaluation<dim, fe_degree, Number>::
-                template type,
+              internal::PortableEvaluation<dim, Degrees, Number>::template type,
               Fields>
               evaluations(cell_data);
             evaluations.read(source);
-            for (unsigned int point = 0; point < n_q_points; ++point)
-              {
-                evaluations.point = point;
-                evaluations.clear();
-                kernel(evaluations);
-                evaluations.submit();
-              }
+            cell_data->for_each_quad_point([&](const int point) {
+              evaluations.point = point;
+              evaluations.clear();
+              kernel(evaluations);
+              evaluations.submit();
+            });
             evaluations.scatter(destination);
           }
         };
@@ -755,12 +802,14 @@ namespace pmf
                 typename VectorType = std::conditional_t<
                   (FormFields<Form>::n_trial_fields > 1),
                   dealii::LinearAlgebra::distributed::BlockVector<Number>,
-                  dealii::LinearAlgebra::distributed::Vector<Number>>>
+                  dealii::LinearAlgebra::distributed::Vector<Number>>,
+                typename Degrees = FieldDegrees<fe_degree>>
       using MatrixFreeOperator = MatrixFreeCellOperator<dim,
                                                         fe_degree,
                                                         std::decay_t<Form>,
                                                         Number,
-                                                        VectorType>;
+                                                        VectorType,
+                                                        Degrees>;
 
       /** @brief Portable bilinear cell operator; form cv/ref qualifiers are ignored. */
       template <int dim,
@@ -772,47 +821,71 @@ namespace pmf
                   dealii::LinearAlgebra::distributed::
                     BlockVector<Number, dealii::MemorySpace::Default>,
                   dealii::LinearAlgebra::distributed::
-                    Vector<Number, dealii::MemorySpace::Default>>>
+                    Vector<Number, dealii::MemorySpace::Default>>,
+                typename Degrees = FieldDegrees<fe_degree>>
       using PortableMatrixFreeOperator =
         PortableMatrixFreeCellOperator<dim,
                                        fe_degree,
                                        std::decay_t<Form>,
                                        Number,
-                                       VectorType>;
+                                       VectorType,
+                                       Degrees>;
 
       /**
        * @brief Create a CPU operator from a bilinear cell form.
-       * @tparam dim Spatial dimension. @tparam fe_degree Common field degree.
+       * @tparam dim Spatial dimension. @tparam fe_degree First or uniform field degree.
+       * @tparam OtherDegrees Remaining degrees in field order; omit for a uniform degree.
        * @param data Initialized MatrixFree data, which may be const.
        * @param form Expression to store by value; const forms are accepted.
        * @return An operator with statically selected field evaluations.
        */
-      template <int dim, int fe_degree, typename Data, typename Form>
+      template <int dim,
+                int fe_degree,
+                int... OtherDegrees,
+                typename Data,
+                typename Form>
       auto
       make_matrix_free_operator(std::shared_ptr<Data> data, Form form)
       {
+        using DefaultOperator =
+          MatrixFreeOperator<dim, fe_degree, Form, typename Data::value_type>;
         return MatrixFreeOperator<dim,
                                   fe_degree,
                                   Form,
-                                  typename Data::value_type>(std::move(data),
-                                                             std::move(form));
+                                  typename Data::value_type,
+                                  typename DefaultOperator::Vector,
+                                  FieldDegrees<fe_degree, OtherDegrees...>>(
+          std::move(data), std::move(form));
       }
 
       /**
        * @brief Create a Portable operator from a bilinear cell form.
-       * @tparam dim Spatial dimension. @tparam fe_degree Common field degree.
+       * @tparam dim Spatial dimension. @tparam fe_degree First or uniform field degree.
+       * @tparam OtherDegrees Remaining degrees in field order; omit for a uniform degree.
        * @param data Initialized mutable Portable MatrixFree data.
        * @param form Expression to store by value; const forms are accepted.
        * @return An operator with statically selected field evaluations.
        */
-      template <int dim, int fe_degree, typename Number, typename Form>
+      template <int dim,
+                int fe_degree,
+                int... OtherDegrees,
+                typename Number,
+                typename Form>
       auto
       make_portable_matrix_free_operator(
         std::shared_ptr<dealii::Portable::MatrixFree<dim, Number>> data,
         Form                                                       form)
       {
-        return PortableMatrixFreeOperator<dim, fe_degree, Form, Number>(
-          std::move(data), std::move(form));
+        using DefaultOperator =
+          PortableMatrixFreeOperator<dim, fe_degree, Form, Number>;
+        return PortableMatrixFreeOperator<
+          dim,
+          fe_degree,
+          Form,
+          Number,
+          typename DefaultOperator::Vector,
+          FieldDegrees<fe_degree, OtherDegrees...>>(std::move(data),
+                                                    std::move(form));
       }
 
       /** @brief Alias for a CPU elasticity operator using generic cell lowering. */
