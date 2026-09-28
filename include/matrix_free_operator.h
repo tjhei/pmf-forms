@@ -94,7 +94,7 @@ namespace pmf
             : evaluation(data, Field::index)
           {}
 
-          DEAL_II_HOST_DEVICE void
+          DEAL_II_HOST_DEVICE_ALWAYS_INLINE void
           prepare(const unsigned int point)
           {
             if constexpr (FieldRequirements<Form, Field>::value)
@@ -114,7 +114,7 @@ namespace pmf
             evaluation.evaluate(field_flags<Form, Field>);
           }
 
-          DEAL_II_HOST_DEVICE void
+          DEAL_II_HOST_DEVICE_ALWAYS_INLINE void
           submit(const unsigned int point)
           {
             if constexpr (FieldRequirements<Form, TestField>::value)
@@ -179,13 +179,13 @@ namespace pmf
              ...);
           }
 
-          DEAL_II_HOST_DEVICE void
+          DEAL_II_HOST_DEVICE_ALWAYS_INLINE void
           clear()
           {
             (static_cast<Slot<Fields> &>(*this).prepare(point), ...);
           }
 
-          DEAL_II_HOST_DEVICE void
+          DEAL_II_HOST_DEVICE_ALWAYS_INLINE void
           submit()
           {
             (static_cast<Slot<Fields> &>(*this).submit(point), ...);
