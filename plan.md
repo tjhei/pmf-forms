@@ -25,8 +25,8 @@ Implemented and build-checked:
   backends, checked against basis-vector applications with constrained rows.
 - A runnable MPI elasticity example that applies both backends to the same
   distributed vector and checks their relative error.
-- A matching scalar Laplace example that binds a non-unit diffusion
-  coefficient and checks both backends under MPI.
+- A manufactured-solution Laplace test with embedded diffusion coefficient,
+  CG and Jacobi solves on both backends, and serial/two-rank MPI coverage.
 - Compile-time trial/test field lists, coefficient occurrence types, and value/gradient
   requirements derived from the expression tree.
 - A two-field Stokes operator using separate velocity and pressure DoFHandlers

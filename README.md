@@ -50,8 +50,8 @@ auto portable_operator = make_portable_matrix_free_operator<dim, degree>(
 ```
 
 Both factories accept const forms and store their own expression values.
-No form-type alias or `std::decay` is needed. Explicit operator aliases
-also accept `decltype(form)`, including const and reference-qualified types.
+Explicit operator aliases also accept `decltype(form)`, including const and
+reference-qualified types.
 
 Call `op.get_diagonal()` to obtain a const reference to its diagonal
 vector (not the inverse). The first call computes and caches it; later calls
@@ -60,6 +60,11 @@ reuse the cache. This works on const CPU and Portable operators. Call
 MatrixFree data. Computation is collective over the operator's MPI communicator,
 so all ranks must call consistently. Constrained entries are one; unconstrained
 Stokes pressure entries are zero. Ghost entries are not updated.
+
+Scalar operators also provide `get_inverse_diagonal()`, which lazily caches
+the reciprocal diagonal for `PreconditionJacobi`. It requires nonzero diagonal
+entries and supports const operators on both backends. `compute_diagonal()`
+invalidates this cache as well. Ghost entries are not updated.
 
 ### Weighted Helmholtz
 
@@ -133,12 +138,14 @@ auto stokes =
   - integral(q * div(u), dx);
 ```
 
-The current Stokes lowering uses separate velocity and pressure DoFHandlers
+The Stokes operators use separate velocity and pressure DoFHandlers
 and block vectors. CPU and Portable operators use the same form. `FormFields`
 and `FieldRequirements` expose expression-derived compile-time metadata for
-field lists and value/gradient requirements. The former Stokes executable is
-now a unit test in `tests/test_stokes.cc`. A second test interpolates the
-manufactured solution derived from the stream function
+field lists and value/gradient requirements.
+
+The tests in `tests/test_stokes.cc` check agreement between the two backends
+and correctness against a manufactured solution. The manufactured-solution
+test interpolates the velocity derived from the stream function
 `x²(1-x)² y²(1-y)²`, with pressure `x + 2y - 1.5`, using
 `VectorTools::interpolate()`. Both backends are checked against independently
 integrated analytical forcing using `FEValues`. Run the Stokes tests on two
@@ -148,20 +155,16 @@ MPI ranks with:
 mpiexec -n 2 ./build/pmf_form_tests "[stokes]"
 ```
 
-## Current scope
+## Supported forms
 
 The implemented matrix-free subset is scalar Laplace and Helmholtz forms,
 including independent constant diffusion and reaction coefficients,
 the supported isotropic elasticity patterns, and a two-field Stokes form.
-The `coefficient(value)` factory currently accepts arithmetic constants and
-stores them by value. A future provider-based overload such as
-`coefficient(mu_function)` can use ordinary deal.II/C++ objects, but spatial
-evaluation, provider lifetimes, device access, and general kernel lowering
-are not implemented yet. The current mixed lowering supports the Stokes form
-above.
-Assembled `FEValues` operators and boundary and face terms are future work.
-See [plan.md](plan.md) for the roadmap and
-status.
+The `coefficient(value)` factory accepts arithmetic constants and stores them
+by value. Spatially varying coefficient providers, general kernel lowering,
+assembled `FEValues` operators, and boundary and face terms are not supported.
+Mixed operators support the Stokes form above.
+See [plan.md](plan.md) for the roadmap and status.
 
 ## Build and test
 
@@ -182,11 +185,27 @@ MPI ranks with:
 mpiexec -n 2 ./build/elasticity
 ```
 
-The Laplace executable does the same comparison for a scalar diffusion form
-with coefficient `2.5`:
+The Laplace example in `laplace/laplace.cc` solves `-2.5 Δu = f` with
+homogeneous Dirichlet conditions and exact solution `u = x(1-x)y(1-y)`.
+It uses quadratic elements and CG with Jacobi preconditioning on both CPU
+and Portable backends. It reports iteration counts, relative residuals,
+solution errors, and the difference between backends, returning a nonzero
+exit code if the accuracy checks fail. Run it with:
 
 ```sh
 mpiexec -n 2 ./build/laplace
+```
+
+The manufactured-solution test in `tests/test_laplace.cc` solves
+`-2.5 Δu = f` with homogeneous Dirichlet
+conditions and exact solution `u = x(1-x)y(1-y)`, using quadratic elements.
+Both CPU and Portable operators use `SolverCG` with `PreconditionJacobi`,
+backed by the cached inverse diagonal. The test independently assembles the
+forcing, checks convergence and the true residual, and compares the solutions with
+`VectorTools::interpolate()` and with each other. Run it on two MPI ranks with:
+
+```sh
+mpiexec -n 2 ./build/pmf_form_tests "[laplace][solve]"
 ```
 
 Catch2 is fetched by CMake into the build tree. Format project C++ files with:

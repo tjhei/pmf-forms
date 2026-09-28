@@ -502,8 +502,14 @@ TEST_CASE("Scalar Laplace form drives CPU and Portable MatrixFree",
   check_diagonals(cpu_op, portable_op);
   check_diagonals(cpu_unit_op, portable_unit_op);
   const double diagonal_norm = cpu_op.get_diagonal().l2_norm();
+  const double inverse_norm  = cpu_op.get_inverse_diagonal().l2_norm();
+  CHECK(portable_op.get_inverse_diagonal().l2_norm() ==
+        Catch::Approx(inverse_norm));
   cpu_op.compute_diagonal();
   portable_op.compute_diagonal();
+  CHECK(cpu_op.get_inverse_diagonal().l2_norm() == Catch::Approx(inverse_norm));
+  CHECK(portable_op.get_inverse_diagonal().l2_norm() ==
+        Catch::Approx(inverse_norm));
   CHECK(cpu_op.get_diagonal().l2_norm() == Catch::Approx(diagonal_norm));
   CHECK(portable_op.get_diagonal().l2_norm() == Catch::Approx(diagonal_norm));
   CHECK(&cpu_op.get_matrix_diagonal()->get_vector() == &cpu_op.get_diagonal());

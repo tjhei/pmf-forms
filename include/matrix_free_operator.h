@@ -3,6 +3,7 @@
 
 #include <deal.II/base/config.h>
 
+#include <deal.II/base/enable_observer_pointer.h>
 #include <deal.II/base/tensor.h>
 
 #include <deal.II/lac/la_parallel_block_vector.h>
@@ -1152,8 +1153,53 @@ namespace pmf
         void
         compute_diagonal() override
         {
+          cached_inverse_diagonal.reset();
           cached_diagonal        = build_diagonal();
           this->diagonal_entries = cached_diagonal;
+        }
+
+        /**
+         * @brief Return the inverse diagonal, computing and caching it on first use.
+         * @return The owned vector of reciprocal diagonal entries.
+         * @pre All locally owned diagonal entries are nonzero.
+         * The first call is collective over the operator's MPI communicator.
+         * The reference remains valid until compute_diagonal() or destruction.
+         */
+        const VectorType &
+        get_inverse_diagonal() const
+        {
+          if (!cached_inverse_diagonal)
+            {
+              const auto &diagonal = get_diagonal();
+              auto        result =
+                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+              auto &inverse = result->get_vector();
+              inverse.reinit(diagonal);
+              for (unsigned int index = 0; index < inverse.locally_owned_size();
+                   ++index)
+                inverse.local_element(index) =
+                  Number(1) / diagonal.local_element(index);
+              cached_inverse_diagonal = std::move(result);
+            }
+          return cached_inverse_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Apply weighted Jacobi using the lazily computed inverse diagonal.
+         * @param dst The initialized destination vector.
+         * @param src The source vector with matching partitioning.
+         * @param omega The relaxation factor.
+         * @pre All locally owned diagonal entries are nonzero.
+         */
+        void
+        precondition_Jacobi(VectorType       &dst,
+                            const VectorType &src,
+                            const Number      omega = Number(1)) const
+        {
+          const auto &inverse = get_inverse_diagonal();
+          dst                 = src;
+          dst.scale(inverse);
+          dst *= omega;
         }
 
       private:
@@ -1172,7 +1218,7 @@ namespace pmf
         }
 
         mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal;
+          cached_diagonal, cached_inverse_diagonal;
 
         void
         apply_add(VectorType &dst, const VectorType &src) const override
@@ -1215,6 +1261,7 @@ namespace pmf
                 typename VectorType = dealii::LinearAlgebra::distributed::
                   Vector<Number, dealii::MemorySpace::Default>>
       class PortableMatrixFreeScalarFormOperator
+        : public dealii::EnableObserverPointer
       {
       public:
         using Data   = dealii::Portable::MatrixFree<dim, Number>;
@@ -1263,7 +1310,60 @@ namespace pmf
         void
         compute_diagonal()
         {
+          cached_inverse_diagonal.reset();
           cached_diagonal = build_diagonal();
+        }
+
+        /**
+         * @brief Return the inverse diagonal, computing and caching it on first use.
+         * @return The owned vector of reciprocal diagonal entries.
+         * @pre All locally owned diagonal entries are nonzero.
+         * The first call is collective over the operator's MPI communicator.
+         * The reference remains valid until compute_diagonal() or destruction.
+         */
+        const VectorType &
+        get_inverse_diagonal() const
+        {
+          if (!cached_inverse_diagonal)
+            {
+              const auto &diagonal = get_diagonal();
+              auto        result =
+                std::make_shared<dealii::DiagonalMatrix<VectorType>>();
+              auto &inverse = result->get_vector();
+              inverse.reinit(diagonal);
+              using ExecutionSpace = typename VectorType::memory_space::
+                kokkos_space::execution_space;
+              auto       *entries          = inverse.get_values();
+              const auto *diagonal_entries = diagonal.get_values();
+              Kokkos::parallel_for(
+                "pmf inverse diagonal",
+                Kokkos::RangePolicy<ExecutionSpace>(
+                  0, inverse.locally_owned_size()),
+                KOKKOS_LAMBDA(const unsigned int index) {
+                  entries[index] = Number(1) / diagonal_entries[index];
+                });
+              ExecutionSpace().fence();
+              cached_inverse_diagonal = std::move(result);
+            }
+          return cached_inverse_diagonal->get_vector();
+        }
+
+        /**
+         * @brief Apply weighted Jacobi using the lazily computed inverse diagonal.
+         * @param dst The initialized destination vector.
+         * @param src The source vector with matching partitioning.
+         * @param omega The relaxation factor.
+         * @pre All locally owned diagonal entries are nonzero.
+         */
+        void
+        precondition_Jacobi(VectorType       &dst,
+                            const VectorType &src,
+                            const Number      omega = Number(1)) const
+        {
+          const auto &inverse = get_inverse_diagonal();
+          dst                 = src;
+          dst.scale(inverse);
+          dst *= omega;
         }
 
       private:
@@ -1282,7 +1382,7 @@ namespace pmf
         }
 
         mutable std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
-          cached_diagonal;
+          cached_diagonal, cached_inverse_diagonal;
 
         struct CellOperation
         {

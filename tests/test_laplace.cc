@@ -13,16 +13,15 @@
 #include <deal.II/grid/grid_generator.h>
 
 #include <deal.II/lac/affine_constraints.h>
-#include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/solver_cg.h>
 
 #include <deal.II/numerics/vector_tools.h>
 
+#include <catch2/catch_test_macros.hpp>
 #include <forms.h>
 #include <matrix_free_operator.h>
 
-#include <iostream>
 #include <memory>
 
 namespace
@@ -51,9 +50,8 @@ namespace
   };
 
   template <typename Operator, typename MemorySpace>
-  bool
+  void
   solve_and_check(
-    const char     *backend,
     const Operator &matrix,
     const dealii::LinearAlgebra::distributed::Vector<double, MemorySpace> &rhs,
     const dealii::LinearAlgebra::distributed::Vector<double, MemorySpace>
@@ -65,34 +63,40 @@ namespace
     matrix.initialize_dof_vector(solution);
     solution              = 0.0;
     const double rhs_norm = rhs.l2_norm();
-
+    REQUIRE(rhs_norm > 0.0);
     dealii::SolverControl                control(400, 1e-12 * rhs_norm);
     dealii::SolverCG<Vector>             solver(control);
     dealii::PreconditionJacobi<Operator> jacobi;
     jacobi.initialize(matrix);
     solver.solve(matrix, solution, rhs, jacobi);
+    const auto &inverse = matrix.get_inverse_diagonal();
+    CHECK(&inverse == &matrix.get_inverse_diagonal());
+    Vector diagonal_product;
+    diagonal_product.reinit(inverse);
+    diagonal_product = inverse;
+    diagonal_product.scale(matrix.get_diagonal());
+    diagonal_product.add(-1.0);
+    CHECK(diagonal_product.linfty_norm() < 1e-14);
+    CHECK(control.last_check() == dealii::SolverControl::success);
+    CHECK(control.last_step() > 0);
+    CHECK(control.last_step() < 400);
+
     Vector residual, error;
     matrix.initialize_dof_vector(residual);
     matrix.initialize_dof_vector(error);
     matrix.vmult(residual, solution);
     residual -= rhs;
-    const double relative_residual = residual.l2_norm() / rhs_norm;
-    error                          = solution;
+    CHECK(residual.l2_norm() / rhs_norm < 1e-11);
+    error = solution;
     error -= exact;
-    const double relative_error = error.l2_norm() / exact.l2_norm();
-    if (dealii::Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
-      std::cout << backend << ": " << control.last_step() << " CG iterations"
-                << ", relative residual: " << relative_residual
-                << ", relative solution error: " << relative_error << '\n';
-    return relative_residual < 1e-11 && relative_error < 1e-10;
+    REQUIRE(exact.l2_norm() > 0.0);
+    CHECK(error.l2_norm() / exact.l2_norm() < 1e-10);
   }
 } // namespace
 
-int
-main(int argc, char **argv)
+TEST_CASE("Laplace manufactured solution is recovered by CG and Jacobi",
+          "[forms][laplace][manufactured][solve]")
 {
-  dealii::Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
-
   constexpr int dim         = 2;
   constexpr int degree      = 2;
   constexpr int refinements = 3;
@@ -145,8 +149,10 @@ main(int argc, char **argv)
                                    ExactSolution{},
                                    exact);
   constraints.distribute(exact);
-  const bool cpu_converged =
-    solve_and_check("CPU MatrixFree", cpu, rhs, exact, cpu_solution);
+  {
+    INFO("CPU MatrixFree");
+    solve_and_check(cpu, rhs, exact, cpu_solution);
+  }
 
   auto portable_data =
     std::make_shared<dealii::Portable::MatrixFree<dim, double>>();
@@ -163,17 +169,12 @@ main(int argc, char **argv)
   portable.initialize_dof_vector(device_exact);
   device_rhs.import_elements(rhs, dealii::VectorOperation::insert);
   device_exact.import_elements(exact, dealii::VectorOperation::insert);
-  const bool portable_converged = solve_and_check(
-    "Portable MatrixFree", portable, device_rhs, device_exact, device_solution);
+  {
+    INFO("Portable MatrixFree");
+    solve_and_check(portable, device_rhs, device_exact, device_solution);
+  }
   portable_solution.import_elements(device_solution,
                                     dealii::VectorOperation::insert);
   portable_solution -= cpu_solution;
-  const double relative_difference =
-    portable_solution.l2_norm() / exact.l2_norm();
-  if (dealii::Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
-    std::cout << "Relative CPU / Portable solution difference: "
-              << relative_difference << '\n';
-  return cpu_converged && portable_converged && relative_difference < 1e-10 ?
-           0 :
-           1;
+  CHECK(portable_solution.l2_norm() / exact.l2_norm() < 1e-10);
 }
