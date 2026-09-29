@@ -30,6 +30,16 @@ namespace pmf
             return constant(context, value);
           }
 
+          template <
+            typename Provider,
+            typename std::enable_if<!std::is_arithmetic<Provider>::value,
+                                    int>::type = 0>
+          DEAL_II_HOST_DEVICE static auto
+          coefficient(const Context &context, const Provider &provider)
+          {
+            return context.coefficient_value(provider);
+          }
+
           template <typename Tensor>
           DEAL_II_HOST_DEVICE static auto
           trace(const Tensor &tensor)
@@ -88,6 +98,11 @@ namespace pmf
         template <typename Number>
         struct PolynomialDegree<Coefficient<Number>>
           : PolynomialDegree<Constant<Number>>
+        {};
+
+        template <typename Provider>
+        struct PolynomialDegree<CoefficientProvider<Provider>>
+          : PolynomialDegree<Constant<double>>
         {};
 
         template <typename Expression>
@@ -202,6 +217,19 @@ namespace pmf
           {
             return LoweringAlgebra<Context>::coefficient(context,
                                                          expression.value);
+          }
+        };
+
+        template <typename Provider>
+        struct Lower<CoefficientProvider<Provider>>
+        {
+          template <typename Context>
+          DEAL_II_HOST_DEVICE static auto
+          evaluate(const CoefficientProvider<Provider> &expression,
+                   const Context                       &context)
+          {
+            return LoweringAlgebra<Context>::coefficient(context,
+                                                         expression.provider);
           }
         };
 

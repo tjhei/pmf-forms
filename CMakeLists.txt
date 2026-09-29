@@ -73,7 +73,7 @@ add_custom_target(indent
 )
 
 if(BUILD_TESTING)
-  add_executable(pmf_form_tests tests/test_main.cc tests/test_stokes.cc tests/test_laplace.cc tests/test_generic_lowering.cc tests/test_inspect_lowering.cc)
+  add_executable(pmf_form_tests tests/test_main.cc tests/test_stokes.cc tests/test_laplace.cc tests/test_generic_lowering.cc tests/test_inspect_lowering.cc tests/test_variable_coefficient.cc)
   deal_ii_setup_target(pmf_form_tests)
   target_link_libraries(pmf_form_tests Catch2::Catch2)
   target_include_directories(pmf_form_tests PRIVATE

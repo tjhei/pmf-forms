@@ -52,6 +52,19 @@ namespace pmf
         Number value;
       };
 
+      /**
+       * @brief A spatially varying scalar coefficient bound to a provider object.
+       * @tparam Provider A copyable object evaluated at quadrature points through
+       *         the operator execution context.
+       */
+      template <typename Provider>
+      struct CoefficientProvider
+      {
+        static constexpr ValueShape shape = ValueShape::scalar;
+        /** @brief The provider copied into each occurrence in a form. */
+        Provider provider;
+      };
+
       /** @brief A scalar constant expression. */
       template <typename Number>
       struct Constant
@@ -159,6 +172,9 @@ namespace pmf
       {};
       template <typename Number>
       struct IsExpression<Coefficient<Number>> : std::true_type
+      {};
+      template <typename Provider>
+      struct IsExpression<CoefficientProvider<Provider>> : std::true_type
       {};
       template <typename Number>
       struct IsExpression<Constant<Number>> : std::true_type
@@ -347,6 +363,14 @@ namespace pmf
           using trial_fields      = TypeList<>;
           using test_fields       = TypeList<>;
           using coefficient_types = TypeList<Coefficient<Number>>;
+        };
+
+        template <typename Provider>
+        struct FieldAnalysis<CoefficientProvider<Provider>>
+        {
+          using trial_fields      = TypeList<>;
+          using test_fields       = TypeList<>;
+          using coefficient_types = TypeList<CoefficientProvider<Provider>>;
         };
 
         template <typename Expression>
@@ -566,7 +590,6 @@ namespace pmf
        * @tparam Number An arithmetic value type.
        * @param value The constant coefficient value.
        * @return A coefficient expression that owns the supplied value.
-       * Spatially varying provider objects are not supported yet.
        */
       template <typename Number,
                 typename std::enable_if<std::is_arithmetic<Number>::value,
@@ -575,6 +598,23 @@ namespace pmf
       coefficient(Number value)
       {
         return {value};
+      }
+
+      /**
+       * @brief Create a spatially varying scalar coefficient from a provider.
+       * @tparam Provider A copyable object invoked at quadrature points. It must
+       *         provide either `operator()(Point<dim>)` or `value(Point<dim>, 0)`.
+       * @param provider The coefficient provider copied into the form.
+       * @return A coefficient expression that owns the supplied provider.
+       */
+      template <
+        typename Provider,
+        typename std::enable_if<!std::is_arithmetic<Provider>::value, int>::type =
+          0>
+      constexpr CoefficientProvider<Provider>
+      coefficient(Provider provider)
+      {
+        return {std::move(provider)};
       }
 
       /** @brief Create a scalar constant expression. */

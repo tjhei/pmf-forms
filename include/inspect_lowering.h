@@ -167,6 +167,19 @@ namespace pmf
             return scalar(LoweringOpcode::coefficient, value);
           }
 
+          template <
+            typename Provider,
+            typename std::enable_if<!std::is_arithmetic<Provider>::value,
+                                    int>::type = 0>
+          static InspectionValue
+          coefficient(const InspectionContext &, const Provider &)
+          {
+            return inspection_node(LoweringOpcode::coefficient,
+                                   {},
+                                   0,
+                                   "<provider>");
+          }
+
           static InspectionValue
           trace(const InspectionValue &value)
           {
