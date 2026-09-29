@@ -47,7 +47,7 @@ Implemented and build-checked:
 
 Still incomplete:
 
-- Variable coefficient fields and general coefficient binding to FE data.
+- General coefficient binding to FE data beyond quadrature-point evaluation.
 - Differential operators on composite expressions and different quadrature
   rules for different fields.
 - `FEValues` assembly from the same form.

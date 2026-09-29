@@ -14,6 +14,7 @@
 #include <deal.II/matrix_free/tools.h>
 
 #include <cell_form_lowering.h>
+#include <coefficient_evaluation.h>
 
 #include <functional>
 #include <memory>
@@ -237,6 +238,25 @@ namespace pmf
             for (unsigned int direction = 0; direction < dimension; ++direction)
               gradient[direction][direction] += value;
           }
+
+          /** @brief Physical coordinates of the current quadrature point. */
+          DEAL_II_HOST_DEVICE dealii::Point<dimension>
+          quadrature_point() const
+          {
+            using FirstField =
+              std::tuple_element_t<0, std::tuple<Fields...>>;
+            return static_cast<const Slot<FirstField> &>(*this)
+              .evaluation.get_quadrature_point(point);
+          }
+
+          /** @brief Evaluate a spatial coefficient provider at the current point. */
+          template <typename Provider>
+          DEAL_II_HOST_DEVICE auto
+          coefficient_value(const Provider &provider) const
+          {
+            return internal::evaluate_coefficient_at_point<dim, Number>(
+              provider, quadrature_point());
+          }
         };
 
         template <int dim, typename Degrees, typename Number>
@@ -330,6 +350,15 @@ namespace pmf
               for (unsigned int direction = 0; direction < dimension;
                    ++direction)
                 submitted_gradient[direction][direction] += value;
+          }
+
+          /** @brief Evaluate a spatial coefficient provider at the current point. */
+          template <typename Provider>
+          DEAL_II_HOST_DEVICE auto
+          coefficient_value(const Provider &provider) const
+          {
+            return internal::evaluate_coefficient_at_point<dim, Number>(
+              provider, evaluation.get_quadrature_point(point));
           }
         };
 

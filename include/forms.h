@@ -5,6 +5,7 @@
  * @brief Public entry point for the expression-template form API.
  */
 
+#include <coefficient_evaluation.h>
 #include <expression_templates.h>
 #include <inspect_lowering.h>
 

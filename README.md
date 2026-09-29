@@ -95,6 +95,25 @@ auto helmholtz_with_literals = integral(
   2.0 * inner(grad(v), grad(u)) + v * (0.25 * u), dx);
 ```
 
+Spatially varying diffusion can be supplied by a provider object copied into
+the form. The operator evaluates it at each quadrature point:
+
+```cpp
+struct Diffusion {
+  double operator()(const dealii::Point<dim> &point) const
+  {
+    return 1.0 + point[0];
+  }
+};
+
+auto laplace = integral(coefficient(Diffusion{}) *
+                          inner(grad(v), grad(u)),
+                        dx);
+```
+
+When using spatial coefficients, include `update_quadrature_points` in the
+MatrixFree mapping update flags.
+
 ### Isotropic elasticity
 
 The expression-template syntax also describes the symmetric-gradient form
@@ -214,7 +233,8 @@ field values, field gradients and divergences, symmetrization, inner products,
 scalar multiplication, and sums/differences of expressions and integrals.
 Every term must be homogeneous of degree one in trial fields and one in test
 fields; nonlinear or affine terms are rejected at compile time. Coefficients
-and literals are arithmetic constants stored by value.
+may be constant scalars stored by value or spatially varying providers copied
+into the form. Literals remain arithmetic constants stored by value.
 
 Operators support two and three spatial dimensions, with one DoFHandler per
 field. Supply a single polynomial degree for uniform-degree fields, or one
@@ -226,8 +246,9 @@ fields must have matching shapes and contiguous indices starting at zero.
 Multiple fields use distributed block vectors. Gradients and divergences
 apply directly to field symbols, not to composite expressions.
 
-Spatially varying coefficient providers, assembled `FEValues` operators, and
-boundary and face terms are not supported.
+Assembled `FEValues` operators and boundary and face terms are not supported.
+MatrixFree operators that use spatial coefficients require
+`update_quadrature_points` in the MatrixFree mapping update flags.
 See [plan.md](plan.md) for the roadmap and status.
 
 ## Build and test
